@@ -720,5 +720,10 @@ public abstract class Loader<ID, VAL> {
             roller.raise();
         }
     }
+
+    public void shutdownNow() {
+        this.shutdown();
+        this.expedite();
+    }
     
 }
