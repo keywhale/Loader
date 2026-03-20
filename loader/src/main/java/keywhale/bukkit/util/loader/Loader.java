@@ -12,19 +12,16 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.jspecify.annotations.Nullable;
 
 import keywhale.bukkit.util.loader.op.AccessOperation;
+import keywhale.bukkit.util.loader.op.DeleteOperation;
 import keywhale.bukkit.util.loader.op.SaveOperation;
 
-public abstract class Loader<VAL, ID> {
+public abstract class Loader<ID, VAL> {
 
     private final JavaPlugin plugin;
     
     private final Object lock = new Object();
 
-    private final Map<ID, VAL> activeCache = new HashMap<>();
-    private final Map<ID, Set<Accessor<VAL, ID>>> activeAccessors = new HashMap<>();
-
-    private final Map<ID, State> states = new HashMap<>();
-    private final Map<ID, List<Runnable>> pendingAccessDuringUnload = new HashMap<>();
+    private final Map<ID, StateTracker<ID, VAL>> trackers = new HashMap<>();
 
     private final Set<Thread> illegalThreads = new HashSet<>();
     
@@ -53,103 +50,69 @@ public abstract class Loader<VAL, ID> {
 
     public void access(
         @Nullable ID identifier,
-        Accessor<VAL, ID> accessor,
+        Accessor<ID, VAL> accessor,
         @Nullable Runnable onNotFound
     ) {
         this.runSync(() -> {
             synchronized (this.lock) {
-                this.access0(identifier, accessor, onNotFound, true);
+                this.access0(identifier, accessor, onNotFound);
             }
+        });
+    }
+
+    public void delete(ID identifier) {
+        this.runSync(() -> {
+            synchronized (this.lock) {
+                StateTracker<ID, VAL> tracker = this.trackers.get(identifier);
+
+                if (tracker == null) {
+                    this.deleteReplaceTracker(identifier);
+                } else {
+                    tracker.delete();
+                }
+            }
+        });
+    }
+
+    // Under Lock
+    private void deleteReplaceTracker(ID identifier) {
+        DeletingStateTracker deleteTracker = new DeletingStateTracker();
+        this.trackers.put(identifier, deleteTracker);
+
+        this.runAsync(() -> {
+            DeleteOperation op = this.opDelete(identifier);
+            op.run();
+
+            this.runSync(() -> {
+                synchronized (this.lock) {
+                    this.trackers.remove(identifier);
+                }
+            });
         });
     }
 
     // Under Lock
     private void access0(
         @Nullable ID identifier,
-        Accessor<VAL, ID> accessor,
-        @Nullable Runnable onNotFound,
-        boolean unloadIfStateIsUnknownAndIsFoundOrCreatedAndIfStateIsNullAndIfDoneDuringInit
+        Accessor<ID, VAL> accessor,
+        @Nullable Runnable onNotFound
     ) {
-        State state = this.states.get(identifier);
+        StateTracker<ID, VAL> tracker = this.trackers.get(identifier);
 
-        if (state == null) {
-            this.accessOnUnknownState(identifier, accessor, onNotFound,
-                unloadIfStateIsUnknownAndIsFoundOrCreatedAndIfStateIsNullAndIfDoneDuringInit
-            );
+        if (tracker == null) {
+            this.accessOnUnknownState(identifier, accessor, onNotFound);
         } else {
-            this.accessOnKnownState(identifier, accessor, onNotFound, state);
-        }
-    }
-
-    private boolean addAccessor(ID identifier, Accessor<VAL, ID> accessor) {
-        Set<Accessor<VAL, ID>> a = this.activeAccessors.get(identifier);
-
-        if (a == null) {
-            a = new HashSet<>();
-            this.activeAccessors.put(identifier, a);
-        }
-
-        return a.add(accessor);
-    }
-
-    private boolean removeAccessor(ID identifier, Accessor<VAL, ID> accessor) {
-        Set<Accessor<VAL, ID>> a = this.activeAccessors.get(identifier);
-
-        if (a == null) {
-            return false;
-        }
-
-        if (a.remove(accessor)) {
-            if (a.isEmpty()) {
-                this.activeAccessors.remove(identifier);
-            }
-
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    private boolean hasAccessor(ID identifier) {
-        Set<Accessor<VAL, ID>> a = this.activeAccessors.get(identifier);
-
-        if (a == null) {
-            return false;
-        }
-
-        return !a.isEmpty();
-    }
-
-    private void addPendingAccessDuringUnload(ID identifier, Runnable r) {
-        List<Runnable> p = this.pendingAccessDuringUnload.get(identifier);
-
-        if (p == null) {
-            p = new ArrayList<>();
-            this.pendingAccessDuringUnload.put(identifier, p);
-        }
-
-        p.add(r);
-    }
-
-    private boolean hasPendingAccessDuringUnload(ID identifier) {
-        List<Runnable> p = this.pendingAccessDuringUnload.get(identifier);
-
-        if (p == null) {
-            return false;
-        } else {
-            if (p.isEmpty()) {
-                this.pendingAccessDuringUnload.remove(identifier);
-                return false;
-            } else {
-                return true;
-            }
+            tracker.access(accessor, onNotFound);
         }
     }
 
     // Under Lock
+    // Only called while active
     private void unload(ID identifier, VAL value) {
-        this.states.put(identifier, State.UNLOADING);
-        SaveOperation<VAL, ID> op = this.opSave(identifier, value);
+        UnloadingStateTracker tracker = new UnloadingStateTracker(identifier, value);
+        this.trackers.put(identifier, tracker);
+
+        SaveOperation op = this.opSave(identifier, value);
         op.runPart1(); // handle exception?
 
         this.runAsync(() -> {
@@ -157,20 +120,7 @@ public abstract class Loader<VAL, ID> {
 
             this.runSync(() -> {
                 synchronized (this.lock) {
-                    this.states.remove(identifier);
-
-                    if (this.hasPendingAccessDuringUnload(identifier)) {
-                        List<Runnable> p = this.pendingAccessDuringUnload.get(identifier);
-                        this.pendingAccessDuringUnload.put(identifier, new ArrayList<>());
-
-                        for (Runnable r : p) {
-                            r.run();
-                        }
-
-                        if (!this.hasAccessor(identifier)) {
-                            this.unload(identifier, value);
-                        }
-                    }
+                    tracker.onComplete();
                 }
             });
         });
@@ -179,37 +129,35 @@ public abstract class Loader<VAL, ID> {
     // Under Lock
     private void accessOnUnknownState(
         @Nullable ID identifier,
-        Accessor<VAL, ID> accessor,
-        @Nullable Runnable onNotFound,
-        boolean unloadIfFoundOrCreatedAndIfStateIsNullAndIfDoneDuringInit
+        Accessor<ID, VAL> accessor,
+        @Nullable Runnable onNotFound
     ) {
         this.runAsync(() -> {
-            AccessOperation<VAL, ID> op = this.opAccess(identifier);
+            AccessOperation<ID, VAL> op = this.opAccess(identifier);
             boolean foundOrCreated = op.runPart1(); // handle exception?
 
             if (foundOrCreated) {
                 this.runSync(() -> {
                     synchronized (this.lock) {
-                        State state = this.states.get(op.id());
+                        StateTracker<ID, VAL> tracker = this.trackers.get(op.id());
 
-                        if (state == null) {
+                        if (tracker == null) {
                             // Make active
                             op.runPart2(); // handle exception?
 
-                            boolean doneDuringInit = this.provisionAccess(
-                                accessor, 
-                                op.id(), 
-                                op.value()
-                            ); // handle exception?
+                            ActiveStateTracker activeTracker
+                                = new ActiveStateTracker(op.id(), op.value());
 
-                            if (doneDuringInit && unloadIfFoundOrCreatedAndIfStateIsNullAndIfDoneDuringInit) {
+                            boolean doneDuringInit
+                                = activeTracker.provisionAccess(accessor); // handle exception?
+
+                            if (doneDuringInit) {
                                 this.unload(op.id(), op.value());
                             } else {
-                                this.states.put(op.id(), (state = State.ACTIVE));
-                                this.activeCache.put(op.id(), op.value());
+                                this.trackers.put(op.id(), activeTracker);
                             }
                         } else {
-                            this.accessOnKnownState(op.id(), accessor, onNotFound, state);
+                            tracker.access(accessor, onNotFound);
                         }
                     }
                     
@@ -222,93 +170,213 @@ public abstract class Loader<VAL, ID> {
         });
     }
 
-    private boolean provisionAccess(Accessor<VAL, ID> accessor, ID identifier, VAL value) {
-        final Object doneLock = new Object();
-        AtomicBoolean isDone = new AtomicBoolean();
-        AtomicBoolean initSuccess = new AtomicBoolean();
-        AtomicBoolean doneDuringInit = new AtomicBoolean();
-        AtomicBoolean isInit = new AtomicBoolean();
-
-        Access<VAL, ID> access = new Access<>() {
-
-            @Override
-            public VAL value() {
-                return value;
-            }
-
-            @Override
-            public ID id() {
-                return identifier;
-            }
-
-            @Override
-            public void done() {
-                synchronized (doneLock) {
-                    if (isDone.get()) {
-                        return;
-                    }
-
-                    isDone.set(true);
-
-                    if (!initSuccess.get()) {
-                        return;
-                    } else if (isInit.get()) {
-                        doneDuringInit.set(true);
-                    } else {
-                        synchronized (Loader.this.lock) {
-                            Loader.this.removeAccessor(identifier, accessor);
-
-                            if (!Loader.this.hasAccessor(identifier)) {
-                                Loader.this.unload(identifier, value);
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        isInit.set(true);
-        try {
-            this.illegalThreads.add(Thread.currentThread());
-            accessor.init(access); // handle exception?
-            initSuccess.set(true);
-        } finally {
-            this.illegalThreads.remove(Thread.currentThread());
-            isInit.set(false);
-        }
-
-        if (!doneDuringInit.get()) {
-            this.addAccessor(identifier, accessor);
-        }
-
-        return doneDuringInit.get();
-    }
-
-    // Under Lock
-    private void accessOnKnownState(
-        @Nullable ID identifier,
-        Accessor<VAL, ID> accessor,
-        @Nullable Runnable onNotFound,
-        State state
-    ) {
-        if (state == State.ACTIVE) {
-            VAL value = this.activeCache.get(identifier);
-            this.provisionAccess(accessor, identifier, value);
-        } else if (state == State.UNLOADING) {
-            this.addPendingAccessDuringUnload(identifier, () -> {
-                this.access0(identifier, accessor, onNotFound, false);
-            });
-        }
+    private class PendingAccessRequest {
+        Accessor<ID, VAL> accessor;
+        @Nullable Runnable onNotFound;
     }
 
     public void access(
         @Nullable ID identifier,
-        Accessor<VAL, ID> accessor
+        Accessor<ID, VAL> accessor
     ) {
         this.access(identifier, accessor, null);
     }
 
-    protected abstract AccessOperation<VAL, ID> opAccess(@Nullable ID identifier);
-    protected abstract SaveOperation<VAL, ID> opSave(ID identifier, VAL value);
+    private interface StateTracker<ID, VAL> {
+        void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound);
+        void delete();
+    }
+
+    private class ActiveStateTracker implements StateTracker<ID, VAL> {
+
+        private final ID identifier;
+        private final VAL value;
+
+        private final Set<Accessor<ID, VAL>> accessors = new HashSet<>();
+
+        ActiveStateTracker(ID identifier, VAL value) {
+            this.identifier = identifier;
+            this.value = value;
+        }
+
+        @Override
+        public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound) {
+            this.provisionAccess(accessor);
+        }
+
+        public void loadPending(List<PendingAccessRequest> pars) {
+            for (var par : pars) {
+                this.provisionAccess(par.accessor);
+            }
+
+            if (this.accessors.isEmpty()) {
+                Loader.this.unload(this.identifier, this.value);
+            }
+        }
+
+        private boolean isActive() {
+            return (Loader.this.trackers.get(this.identifier) == this);
+        }
+
+        private boolean provisionAccess(Accessor<ID, VAL> accessor) {
+            AtomicBoolean isDone = new AtomicBoolean();
+            AtomicBoolean initSuccess = new AtomicBoolean();
+            AtomicBoolean doneDuringInit = new AtomicBoolean();
+            AtomicBoolean isInit = new AtomicBoolean();
+
+            final Object doneLock = new Object();
+            final var ast = this;
+
+            Access<ID, VAL> access = new Access<>() {
+
+                @Override
+                public VAL value() {
+                    return ast.value;
+                }
+
+                @Override
+                public ID id() {
+                    return ast.identifier;
+                }
+
+                @Override
+                public void done() {
+                    synchronized (doneLock) {
+                        if (isDone.get()) {
+                            return;
+                        }
+
+                        isDone.set(true);
+
+                        if (!initSuccess.get()) {
+                            return;
+                        } else if (isInit.get()) {
+                            doneDuringInit.set(true);
+                        } else {
+                            synchronized (Loader.this.lock) {
+                                if (ast.isActive()) {
+                                    ast.accessors.remove(accessor);
+
+                                    if (ast.accessors.isEmpty()) {
+                                        Loader.this.unload(ast.identifier, ast.value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            isInit.set(true);
+            try {
+                Loader.this.illegalThreads.add(Thread.currentThread());
+                accessor.init(access); // handle exception?
+                initSuccess.set(true);
+            } finally {
+                Loader.this.illegalThreads.remove(Thread.currentThread());
+                isInit.set(false);
+            }
+
+            if (!doneDuringInit.get()) {
+                this.accessors.add(accessor);
+            }
+
+            return doneDuringInit.get();
+        }
+
+        @Override
+        public void delete() {
+            Loader.this.deleteReplaceTracker(this.identifier);
+
+            try {
+                Loader.this.illegalThreads.add(Thread.currentThread());
+                for (var accessor : this.accessors) {
+                    accessor.cancel(); // handle exception?
+                }
+            } finally {
+                Loader.this.illegalThreads.remove(Thread.currentThread());
+                this.accessors.clear();
+            }
+        }
+
+    }
+
+    private class UnloadingStateTracker implements StateTracker<ID, VAL> {
+
+        private final ID identifier;
+        private final VAL value;
+
+        private final List<PendingAccessRequest> pendingAccess = new ArrayList<>();
+        private boolean pendingDelete = false;
+
+        UnloadingStateTracker(ID identifier, VAL value) {
+            this.identifier = identifier;
+            this.value = value;
+        }
+
+        @Override
+        public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound) {
+            var par = new PendingAccessRequest(); {
+                par.accessor = accessor;
+                par.onNotFound = onNotFound;
+            }
+
+            this.pendingAccess.add(par);
+        }
+
+        public void onComplete() {
+            Loader.this.trackers.remove(this.identifier);
+
+            if (this.pendingDelete) {
+                try {
+                    Loader.this.illegalThreads.add(Thread.currentThread());
+                    for (var par : this.pendingAccess) {
+                        if (par.onNotFound != null) {
+                            par.onNotFound.run();
+                        }
+                    }
+                } finally {
+                    Loader.this.illegalThreads.remove(Thread.currentThread());
+                    Loader.this.deleteReplaceTracker(this.identifier);
+                }
+            } else if (!this.pendingAccess.isEmpty()) {
+                ActiveStateTracker activeTracker
+                    = new ActiveStateTracker(this.identifier, this.value);
+                Loader.this.trackers.put(this.identifier, activeTracker);
+
+                activeTracker.loadPending(this.pendingAccess);
+            }
+        }
+
+        @Override
+        public void delete() {
+            this.pendingDelete = true;
+        }
+
+    }
+
+    private class DeletingStateTracker implements StateTracker<ID, VAL> {
+
+        @Override
+        public void access(Accessor<ID, VAL> accessor, @Nullable Runnable onNotFound) {
+            // Into the void...
+        }
+
+        @Override
+        public void delete() {
+            // Into the void...
+        }
+
+    }
+
+    // This should NOT call any methods on Loader
+    protected abstract AccessOperation<ID, VAL> opAccess(@Nullable ID identifier);
+    // This should NOT call any methods on Loader
+    protected abstract SaveOperation opSave(ID identifier, VAL value);
+    // This should NOT call any methods on Loader
+    protected abstract DeleteOperation opDelete(ID identifier);
+
+    // TODO: Implement Shutdown
+    // TODO: Implement Expediting
     
 }

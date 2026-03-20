@@ -1,6 +1,6 @@
 package keywhale.bukkit.util.loader.op;
 
-public interface AccessOperation<VAL, ID> {
+public interface AccessOperation<ID, VAL> {
     public VAL value();
     public ID id();
 
