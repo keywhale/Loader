@@ -593,11 +593,15 @@ public abstract class Loader<ID, VAL> {
                 this.pendingDelete = false;
             } else if (this.pendingDelete) {
                 try {
+                    var roller = new RuntimeExceptionRoller();
+
                     for (var par : this.pendingAccess) {
                         if (par.onNotFound != null) {
-                            par.onNotFound.run();
+                            roller.exec(par.onNotFound);
                         }
                     }
+
+                    roller.raise();
                 } finally {
                     Loader.this.deleteReplaceTracker(this.identifier, this.pendingDeleteExceptionHandler);
                 }
