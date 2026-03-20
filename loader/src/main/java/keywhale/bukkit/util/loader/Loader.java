@@ -20,7 +20,6 @@ public abstract class Loader<ID, VAL> {
     private final JavaPlugin plugin;
     private final Object lock = new Object();
     private final Map<ID, StateTracker<ID, VAL>> trackers = new HashMap<>();
-    private final Set<Thread> illegalThreads = new HashSet<>();
     private boolean isShutdown = false;
 
     public Loader(JavaPlugin plugin) {
@@ -34,16 +33,9 @@ public abstract class Loader<ID, VAL> {
     }
 
     private void runSync(Runnable r) {
-        if (
-            this.plugin.getServer().isPrimaryThread() 
-            && !this.illegalThreads.contains(Thread.currentThread())
-        ) {
-            r.run(); // handle exception?
-        } else {
-            this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
-                r.run();
-            });
-        }
+        this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
+            r.run();
+        });
     }
 
     public static class ShuttingDownException extends IllegalStateException {}
@@ -307,11 +299,9 @@ public abstract class Loader<ID, VAL> {
 
             isInit.set(true);
             try {
-                Loader.this.illegalThreads.add(Thread.currentThread());
                 accessor.init(access); // handle exception?
                 initSuccess.set(true);
             } finally {
-                Loader.this.illegalThreads.remove(Thread.currentThread());
                 isInit.set(false);
             }
 
@@ -327,12 +317,10 @@ public abstract class Loader<ID, VAL> {
             Loader.this.deleteReplaceTracker(this.identifier);
 
             try {
-                Loader.this.illegalThreads.add(Thread.currentThread());
                 for (var accessor : this.accessors) {
                     accessor.cancel(); // handle exception?
                 }
             } finally {
-                Loader.this.illegalThreads.remove(Thread.currentThread());
                 this.accessors.clear();
             }
         }
@@ -342,12 +330,10 @@ public abstract class Loader<ID, VAL> {
             this.isShuttingDown = true;
 
             try {
-                Loader.this.illegalThreads.add(Thread.currentThread());
                 for (var accessor : this.accessors) {
                     accessor.cancel(); // handle exception?
                 }
             } finally {
-                Loader.this.illegalThreads.remove(Thread.currentThread());
                 this.accessors.clear();
                 Loader.this.unload(this.identifier, this.value);
             }
@@ -388,14 +374,12 @@ public abstract class Loader<ID, VAL> {
                 this.pendingDelete = false;
             } else if (this.pendingDelete) {
                 try {
-                    Loader.this.illegalThreads.add(Thread.currentThread());
                     for (var par : this.pendingAccess) {
                         if (par.onNotFound != null) {
                             par.onNotFound.run();
                         }
                     }
                 } finally {
-                    Loader.this.illegalThreads.remove(Thread.currentThread());
                     Loader.this.deleteReplaceTracker(this.identifier);
                 }
             } else if (!this.pendingAccess.isEmpty()) {
