@@ -7,9 +7,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitTask;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
@@ -709,6 +712,22 @@ public abstract class Loader<ID, VAL> {
             // Into the void...
         }
 
+    }
+
+    public BukkitTask autoRelease(
+        Access<ID, VAL> access, 
+        Supplier<Boolean> isAccessing, 
+        long intervalTicks
+    ) {
+        AtomicReference<BukkitTask> bt = new AtomicReference<>();
+        BukkitTask task = this.plugin.getServer().getScheduler().runTaskTimer(this.plugin, () -> {
+            if (!isAccessing.get()) {
+                bt.get().cancel();
+                access.done();
+            }
+        }, intervalTicks, intervalTicks);
+        bt.set(task);
+        return task;
     }
 
     // This should NOT call any methods on Loader
