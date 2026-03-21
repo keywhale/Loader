@@ -46,16 +46,19 @@ public abstract class Loader<ID, VAL> {
             this.pendingRunnables.add(r);
             if (this.isExpediting) return;
         }
-        this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
-            boolean shouldRun;
-            synchronized (this.lock) {
-                shouldRun = this.pendingRunnables.remove(r);
-            }
 
-            if (shouldRun) {
-                r.run();
-            }
-        });
+        if (this.plugin.isEnabled()) {
+            this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
+                boolean shouldRun;
+                synchronized (this.lock) {
+                    shouldRun = this.pendingRunnables.remove(r);
+                }
+
+                if (shouldRun) {
+                    r.run();
+                }
+            });
+        }
     }
 
     private void runSync(Runnable r) {
@@ -63,16 +66,19 @@ public abstract class Loader<ID, VAL> {
             this.pendingRunnables.add(r);
             if (this.isExpediting) return;
         }
-        this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
-            boolean shouldRun;
-            synchronized (this.lock) {
-                shouldRun = this.pendingRunnables.remove(r);
-            }
 
-            if (shouldRun) {
-                r.run();
-            }
-        });
+        if (this.plugin.isEnabled()) {
+            this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
+                boolean shouldRun;
+                synchronized (this.lock) {
+                    shouldRun = this.pendingRunnables.remove(r);
+                }
+
+                if (shouldRun) {
+                    r.run();
+                }
+            });
+        }
     }
 
     public static class ShuttingDownException extends IllegalStateException {}
