@@ -32,6 +32,7 @@ public abstract class Loader<ID, VAL> {
     private final Map<ID, StateTracker<ID, VAL>> trackers = new HashMap<>();
     private final Set<Runnable> pendingRunnables = new HashSet<>();
     private boolean isShutdown = false;
+    private boolean isExpediting = false;
 
     public Loader(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -40,6 +41,7 @@ public abstract class Loader<ID, VAL> {
     private void runAsync(Runnable r) {
         synchronized (this.lock) {
             this.pendingRunnables.add(r);
+            if (this.isExpediting) return;
         }
         this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
             boolean shouldRun;
@@ -56,6 +58,7 @@ public abstract class Loader<ID, VAL> {
     private void runSync(Runnable r) {
         synchronized (this.lock) {
             this.pendingRunnables.add(r);
+            if (this.isExpediting) return;
         }
         this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
             boolean shouldRun;
@@ -101,29 +104,40 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
-    public void shutdown(@Nullable SaveOperationExceptionHandler onSaveException) {
+    public void shutdownAndExpedite(@Nullable SaveOperationExceptionHandler onSaveException) {
         synchronized (this.lock) {
             if (this.isShutdown) {
                 return;
             }
 
             this.isShutdown = true;
+            this.isExpediting = true;
 
-            this.runSync(() -> {
-                synchronized (this.lock) {
-                    Map<ID, StateTracker<ID, VAL>> trackersCopy
-                        = new HashMap<>(this.trackers);
-                    
-                    for (StateTracker<ID, VAL> tracker : trackersCopy.values()) {
-                        tracker.shutdown(this.getExceptionHandler(onSaveException));
-                    }
+            Map<ID, StateTracker<ID, VAL>> trackersCopy
+                    = new HashMap<>(this.trackers);
+
+            for (StateTracker<ID, VAL> tracker : trackersCopy.values()) {
+                tracker.shutdown(this.getExceptionHandler(onSaveException));
+            }
+
+            RuntimeExceptionRoller roller = new RuntimeExceptionRoller();
+
+            while (!this.pendingRunnables.isEmpty()) {
+                var pendingRunnablesCopy = new HashSet<>(this.pendingRunnables);
+                this.pendingRunnables.clear();
+
+                for (var pr : pendingRunnablesCopy) {
+                    roller.exec(pr);
                 }
-            });
+            }
+            
+            this.isExpediting = false;
+            roller.raise();
         }
     }
 
-    public void shutdown() {
-        this.shutdown(null);
+    public void shutdownAndExpedite() {
+        this.shutdownAndExpedite(null);
     }
 
     private DeleteOperationExceptionHandler getExceptionHandler(
@@ -704,26 +718,4 @@ public abstract class Loader<ID, VAL> {
     // This should NOT call any methods on Loader
     protected abstract DeleteOperation opDelete(ID identifier);
 
-    public void expedite() {
-        synchronized (this.lock) {
-            RuntimeExceptionRoller roller = new RuntimeExceptionRoller();
-
-            while (!this.pendingRunnables.isEmpty()) {
-                var pendingRunnablesCopy = new HashSet<>(this.pendingRunnables);
-                this.pendingRunnables.clear();
-
-                for (var pr : pendingRunnablesCopy) {
-                    roller.exec(pr);
-                }
-            }
-            
-            roller.raise();
-        }
-    }
-
-    public void shutdownNow() {
-        this.shutdown();
-        this.expedite();
-    }
-    
 }
