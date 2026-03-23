@@ -6,7 +6,7 @@
 
     <groupId>keywhale.bukkit.util</groupId>
     <artifactId>loader</artifactId>
-    <version>2.1.2</version>
+    <version>3.0.0</version>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
