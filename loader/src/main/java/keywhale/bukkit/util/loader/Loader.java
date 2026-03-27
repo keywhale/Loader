@@ -1,11 +1,13 @@
 package keywhale.bukkit.util.loader;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -28,6 +30,7 @@ public abstract class Loader<ID, VAL> {
     private final Object lock = new Object();
     private final Map<ID, StateTracker<ID, VAL>> trackers = new HashMap<>();
     private final Set<Runnable> pendingRunnables = new HashSet<>();
+    private final Queue<Runnable> pendingTopLevelRunnables = new ArrayDeque<>();
     private boolean isShutdown = false;
     private boolean isExpediting = false;
 
@@ -39,18 +42,32 @@ public abstract class Loader<ID, VAL> {
         synchronized (this.lock) {
             this.pendingRunnables.add(r);
             if (this.isExpediting) return;
+
+            if (this.plugin.isEnabled()) {
+                this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
+                    boolean shouldRun;
+                    synchronized (this.lock) {
+                        shouldRun = this.pendingRunnables.remove(r);
+                    }
+
+                    if (shouldRun) {
+                        r.run();
+                    }
+                });
+            }
         }
+    }
 
-        if (this.plugin.isEnabled()) {
-            this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
-                boolean shouldRun;
+    private void runTopLevel(Runnable r) {
+        synchronized (this.lock) {
+            this.pendingTopLevelRunnables.add(r);
+            // Reentrant
+            this.runSync(() -> {
+                Runnable topLevelRunnable;
                 synchronized (this.lock) {
-                    shouldRun = this.pendingRunnables.remove(r);
+                    topLevelRunnable = this.pendingTopLevelRunnables.poll();
                 }
-
-                if (shouldRun) {
-                    r.run();
-                }
+                topLevelRunnable.run();
             });
         }
     }
@@ -59,19 +76,19 @@ public abstract class Loader<ID, VAL> {
         synchronized (this.lock) {
             this.pendingRunnables.add(r);
             if (this.isExpediting) return;
-        }
 
-        if (this.plugin.isEnabled()) {
-            this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
-                boolean shouldRun;
-                synchronized (this.lock) {
-                    shouldRun = this.pendingRunnables.remove(r);
-                }
+            if (this.plugin.isEnabled()) {
+                this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
+                    boolean shouldRun;
+                    synchronized (this.lock) {
+                        shouldRun = this.pendingRunnables.remove(r);
+                    }
 
-                if (shouldRun) {
-                    r.run();
-                }
-            });
+                    if (shouldRun) {
+                        r.run();
+                    }
+                });
+            }
         }
     }
 
@@ -99,7 +116,7 @@ public abstract class Loader<ID, VAL> {
         synchronized (this.lock) {
             this.checkShutdown();
 
-            this.runSync(() -> {
+            this.runTopLevel(() -> {
                 synchronized (this.lock) {
                     this.access0(identifier, accessor);
                 }
@@ -142,7 +159,7 @@ public abstract class Loader<ID, VAL> {
         synchronized (this.lock) {
             this.checkShutdown();
 
-            this.runSync(() -> {
+            this.runTopLevel(() -> {
                 synchronized (this.lock) {
                     StateTracker<ID, VAL> tracker = this.trackers.get(identifier);
 
