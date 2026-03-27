@@ -1,4 +1,4 @@
-package keywhale.bukkit.util.loader.op.exc;
+package keywhale.bukkit.util.loader.op;
 
 public interface OperationExceptionHandler<ID, VAL> {
 
