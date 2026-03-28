@@ -3,8 +3,6 @@ package keywhale.util.loader;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
-import org.jspecify.annotations.Nullable;
-
 public interface Accessor<ID, VAL> {
 
     public void init(Access<ID, VAL> access);
@@ -30,7 +28,7 @@ public interface Accessor<ID, VAL> {
 
     public static <ID, VAL> Accessor<ID, VAL> of(
         Consumer<Access<ID, VAL>> consumer,
-        @Nullable Runnable onNotFound,
+        Runnable onNotFound,
         boolean requiresSave
     ) {
         return of(
@@ -53,7 +51,7 @@ public interface Accessor<ID, VAL> {
 
     public static <ID, VAL> Accessor<ID, VAL> of(
         Function<Access<ID, VAL>, Runnable> function,
-        @Nullable Runnable onNotFound,
+        Runnable onNotFound,
         boolean requiresSave
     ) {
         return new Accessor<ID, VAL>() {

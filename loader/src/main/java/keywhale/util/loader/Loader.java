@@ -9,8 +9,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.jspecify.annotations.Nullable;
-
 import keywhale.util.loader.op.AccessOperation;
 import keywhale.util.loader.op.DeleteOperation;
 import keywhale.util.loader.op.SaveOperation;
@@ -98,7 +96,7 @@ public abstract class Loader<ID, VAL> {
 
         private final ID identifier;
         private final List<AccessRequest<ID, VAL>> pendingAccess = new ArrayList<>();
-        @Nullable private DeleteOperation pendingDelete = null;
+        private DeleteOperation pendingDelete = null;
         private boolean pendingShutdown = false;
 
         LoadingStateTracker(ID identifier) {
@@ -397,7 +395,7 @@ public abstract class Loader<ID, VAL> {
 
         private final List<AccessRequest<ID, VAL>> pendingAccess = new ArrayList<>();
 
-        @Nullable private DeleteOperation pendingDelete = null;
+        private DeleteOperation pendingDelete = null;
         private boolean pendingShutdown = false;
 
         UnloadingStateTracker(ID identifier, VAL value) {
