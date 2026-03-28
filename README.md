@@ -22,7 +22,7 @@ Requests that arrive while a value is loading, unloading, or deleting are queued
 
 ### Threading Model
 
-Operations own their threading. `Loader` itself never schedules work — it only receives callbacks. The thread on which a callback is fired determines the thread that subsequent work (e.g. `Accessor.init`) runs on.
+Operations own their threading. `Loader` itself never schedules work — it only receives callbacks. For `AccessOperation` and `SaveOperation`, the thread on which the callback is fired determines the thread that `Accessor.init` runs on for any pending accesses. For `DeleteOperation`, pending accesses are re-issued via their own `AccessOperation` after the delete completes, so the callback thread does not affect where `Accessor.init` runs.
 
 ---
 
@@ -109,11 +109,11 @@ Both `access` overloads and `delete` throw `ShuttingDownException` if called aft
 
 ## Step 3: Operations
 
-Operations are functional interfaces and can be implemented as lambdas. Each fires a callback when complete, on whichever thread the implementation chooses — that thread is where subsequent work runs.
+Operations are functional interfaces and can be implemented as lambdas. Each fires a callback when complete, on whichever thread the implementation chooses.
 
 ### `AccessOperation<ID, VAL>`
 
-Dual-purpose: implementations may load an existing value or create a new one.
+Dual-purpose: implementations may load an existing value or create a new one. The callback thread determines where `Accessor.init` runs.
 
 ```java
 (callback, onNotFound) -> {
@@ -122,7 +122,7 @@ Dual-purpose: implementations may load an existing value or create a new one.
         if (data == null) {
             onNotFound.run();
         } else {
-            callback.accept(id, data); // fires on this thread
+            callback.accept(id, data); // Accessor.init runs on this thread
         }
     });
 }
@@ -132,16 +132,20 @@ Pass `null` for `onNotFound` if creation is guaranteed (not-found is impossible)
 
 ### `SaveOperation`
 
+The callback thread determines where `Accessor.init` runs for any accesses pending while the save was in progress.
+
 ```java
 callback -> {
     executor.execute(() -> {
         database.save(id, data);
-        callback.run(); // fires on this thread
+        callback.run(); // Accessor.init for pending accesses runs on this thread
     });
 }
 ```
 
 ### `DeleteOperation`
+
+Pending accesses are re-issued via their `AccessOperation` after the delete completes, so the callback thread does not affect where `Accessor.init` runs.
 
 ```java
 callback -> {
