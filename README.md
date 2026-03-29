@@ -66,13 +66,21 @@ public class PlayerLoader extends Loader<UUID, PlayerData> {
         }, accessor);
     }
 
-    public void deletePlayer(UUID id) {
-        this.delete(id, callback -> {
+    public void deletePlayer(UUID id, Deleter deleter) {
+        this.delete(id, (onDeleted, onNotFound) -> {
             executor.execute(() -> {
-                database.delete(id);
-                callback.run();
+                boolean existed = database.delete(id);
+                if (existed) {
+                    onDeleted.run();
+                } else {
+                    onNotFound.run();
+                }
             });
-        });
+        }, deleter);
+    }
+
+    public void deletePlayer(UUID id) {
+        this.deletePlayer(id, null);
     }
 
     @Override
@@ -99,9 +107,9 @@ Fires the operation immediately without checking the cache. Use when the ID is n
 
 Checks the cache first. If the value is already active, `Accessor.init` is called immediately. If not, a loading tracker is placed in the cache and the operation is fired. Concurrent accesses for the same ID coalesce — only one operation fires; the rest wait.
 
-### `delete(ID, DeleteOperation)`
+### `delete(ID, DeleteOperation)` / `delete(ID, DeleteOperation, Deleter)`
 
-Cancels all active accessors for the ID and runs the delete operation. Accesses that arrive while the delete is in progress are queued and re-issued once complete.
+Cancels all active accessors for the ID and runs the delete operation. Accesses that arrive while the delete is in progress are queued and re-issued once complete. The optional `Deleter` is notified of the outcome — `done()` if the record was deleted, `onNotFound()` if nothing matched.
 
 Both `access` overloads and `delete` throw `ShuttingDownException` if called after `shutdown()`.
 
@@ -145,15 +153,40 @@ callback -> {
 
 ### `DeleteOperation`
 
-Pending accesses are re-issued via their `AccessOperation` after the delete completes, so the callback thread does not affect where `Accessor.init` runs.
+Pending accesses are re-issued via their `AccessOperation` after the delete completes, so the callback thread does not affect where `Accessor.init` runs. Call `onDeleted` if the record was removed, `onNotFound` if nothing matched.
 
 ```java
-callback -> {
+(onDeleted, onNotFound) -> {
     executor.execute(() -> {
-        database.delete(id);
-        callback.run();
+        boolean existed = database.delete(id);
+        if (existed) {
+            onDeleted.run();
+        } else {
+            onNotFound.run();
+        }
     });
 }
+```
+
+### `Deleter`
+
+Optional callback passed to `delete(ID, DeleteOperation, Deleter)` to observe the outcome.
+
+```java
+loader.deletePlayer(playerId, new Deleter() {
+    public void done() {
+        System.out.println("Player deleted");
+    }
+    public void onNotFound() {
+        System.out.println("Player not found");
+    }
+});
+```
+
+`onNotFound()` has a default no-op implementation, so a lambda works if you only care about the success case:
+
+```java
+loader.deletePlayer(playerId, () -> System.out.println("Player deleted"));
 ```
 
 ---

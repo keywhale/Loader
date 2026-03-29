@@ -42,17 +42,26 @@ public abstract class Loader<ID, VAL> {
     }
 
     // Under Lock
-    private void deleteReplaceTracker(ID identifier, DeleteOperation op, Collection<AccessRequest<ID, VAL>> accessors) {
+    private void deleteReplaceTracker(ID identifier, DeleteRequest deleteRequest, Collection<AccessRequest<ID, VAL>> accessors) {
         DeletingStateTracker deleteTracker = new DeletingStateTracker(identifier);
         this.trackers.put(identifier, deleteTracker);
 
         deleteTracker.pendingAccess.addAll(accessors);
 
-        op.start(() -> {
-            synchronized (this.lock) {
-                deleteTracker.onComplete();
+        deleteRequest.op().start(
+            () -> {
+                synchronized (this.lock) {
+                    if (deleteRequest.deleter() != null) deleteRequest.deleter().done();
+                    deleteTracker.onComplete();
+                }
+            },
+            () -> {
+                synchronized (this.lock) {
+                    if (deleteRequest.deleter() != null) deleteRequest.deleter().onNotFound();
+                    deleteTracker.onComplete();
+                }
             }
-        });
+        );
     }
 
     private static class RuntimeExceptionRoller {
@@ -86,9 +95,14 @@ public abstract class Loader<ID, VAL> {
         Accessor<ID, VAL> accessor
     ) {}
 
+    private record DeleteRequest(
+        DeleteOperation op,
+        Deleter deleter
+    ) {}
+
     private interface StateTracker<ID, VAL> {
         void access(AccessOperation<ID, VAL> op, Accessor<ID, VAL> accessor);
-        void delete(DeleteOperation op);
+        void delete(DeleteOperation op, Deleter deleter);
         void shutdown();
     }
 
@@ -96,7 +110,7 @@ public abstract class Loader<ID, VAL> {
 
         private final ID identifier;
         private final List<AccessRequest<ID, VAL>> pendingAccess = new ArrayList<>();
-        private DeleteOperation pendingDelete = null;
+        private DeleteRequest pendingDelete = null;
         private boolean pendingShutdown = false;
 
         LoadingStateTracker(ID identifier) {
@@ -131,7 +145,7 @@ public abstract class Loader<ID, VAL> {
                         if (activeTracker.accessors.isEmpty()) {
                             Loader.this.deleteReplaceTracker(id, this.pendingDelete, new ArrayList<>());
                         } else {
-                            activeTracker.delete(this.pendingDelete);
+                            activeTracker.delete(this.pendingDelete.op(), this.pendingDelete.deleter());
                             Loader.this.trackers.put(id, activeTracker);
                         }
                     } else {
@@ -166,8 +180,8 @@ public abstract class Loader<ID, VAL> {
         }
 
         @Override
-        public void delete(DeleteOperation op) {
-            this.pendingDelete = op;
+        public void delete(DeleteOperation op, Deleter deleter) {
+            this.pendingDelete = new DeleteRequest(op, deleter);
         }
 
         @Override
@@ -191,7 +205,7 @@ public abstract class Loader<ID, VAL> {
 
         private static interface Substate<ID, VAL> {
             void access(AccessOperation<ID, VAL> op, Accessor<ID, VAL> accessor);
-            void delete(DeleteOperation op);
+            void delete(DeleteOperation op, Deleter deleter);
             void shutdown();
             void done(Accessor<ID, VAL> accessor);
         }
@@ -204,8 +218,8 @@ public abstract class Loader<ID, VAL> {
             }
 
             @Override
-            public void delete(DeleteOperation op) {
-                athis.substate = new DeletingSubstate(op);
+            public void delete(DeleteOperation op, Deleter deleter) {
+                athis.substate = new DeletingSubstate(op, deleter);
                 this.cancel();
             }
 
@@ -245,11 +259,11 @@ public abstract class Loader<ID, VAL> {
 
         private class DeletingSubstate implements Substate<ID, VAL> {
 
-            private final DeleteOperation deleteOp;
+            private final DeleteRequest deleteRequest;
             private final List<AccessRequest<ID, VAL>> pendingAccess = new ArrayList<>();
 
-            DeletingSubstate(DeleteOperation op) {
-                this.deleteOp = op;
+            DeletingSubstate(DeleteOperation op, Deleter deleter) {
+                this.deleteRequest = new DeleteRequest(op, deleter);
             }
 
             @Override
@@ -258,7 +272,7 @@ public abstract class Loader<ID, VAL> {
             }
 
             @Override
-            public void delete(DeleteOperation op) {}
+            public void delete(DeleteOperation op, Deleter deleter) {}
 
             @Override
             public void shutdown() {
@@ -270,7 +284,7 @@ public abstract class Loader<ID, VAL> {
                 athis.accessors.remove(accessor);
 
                 if (athis.accessors.isEmpty()) {
-                    Loader.this.deleteReplaceTracker(athis.identifier, this.deleteOp, this.pendingAccess);
+                    Loader.this.deleteReplaceTracker(athis.identifier, this.deleteRequest, this.pendingAccess);
                 }
             }
 
@@ -282,7 +296,7 @@ public abstract class Loader<ID, VAL> {
             public void access(AccessOperation<ID, VAL> op, Accessor<ID, VAL> accessor) {}
 
             @Override
-            public void delete(DeleteOperation op) {}
+            public void delete(DeleteOperation op, Deleter deleter) {}
 
             @Override
             public void shutdown() {}
@@ -377,8 +391,8 @@ public abstract class Loader<ID, VAL> {
         }
 
         @Override
-        public void delete(DeleteOperation op) {
-            this.substate.delete(op);
+        public void delete(DeleteOperation op, Deleter deleter) {
+            this.substate.delete(op, deleter);
         }
 
         @Override
@@ -395,7 +409,7 @@ public abstract class Loader<ID, VAL> {
 
         private final List<AccessRequest<ID, VAL>> pendingAccess = new ArrayList<>();
 
-        private DeleteOperation pendingDelete = null;
+        private DeleteRequest pendingDelete = null;
         private boolean pendingShutdown = false;
 
         UnloadingStateTracker(ID identifier, VAL value) {
@@ -445,8 +459,8 @@ public abstract class Loader<ID, VAL> {
         }
 
         @Override
-        public void delete(DeleteOperation op) {
-            this.pendingDelete = op;
+        public void delete(DeleteOperation op, Deleter deleter) {
+            this.pendingDelete = new DeleteRequest(op, deleter);
         }
 
         @Override
@@ -482,7 +496,7 @@ public abstract class Loader<ID, VAL> {
         }
 
         @Override
-        public void delete(DeleteOperation op) {}
+        public void delete(DeleteOperation op, Deleter deleter) {}
 
         @Override
         public void shutdown() {
@@ -566,15 +580,23 @@ public abstract class Loader<ID, VAL> {
         ID identifier,
         DeleteOperation op
     ) {
+        this.delete(identifier, op, null);
+    }
+
+    protected void delete(
+        ID identifier,
+        DeleteOperation op,
+        Deleter deleter
+    ) {
         synchronized (this.lock) {
             this.checkShutdown();
 
             StateTracker<ID, VAL> tracker = this.trackers.get(identifier);
 
             if (tracker == null) {
-                this.deleteReplaceTracker(identifier, op, new ArrayList<>());
+                this.deleteReplaceTracker(identifier, new DeleteRequest(op, deleter), new ArrayList<>());
             } else {
-                tracker.delete(op);
+                tracker.delete(op, deleter);
             }
         }
     }
