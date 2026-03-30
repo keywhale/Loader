@@ -358,10 +358,10 @@ public abstract class Loader<ID, VAL> {
 
                         isDone.set(true);
 
-                        if (!initSuccess.get()) {
-                            return;
-                        } else if (isInit.get()) {
+                        if (isInit.get()) {
                             doneDuringInit.set(true);
+                        } else if (!initSuccess.get()) {
+                            return;
                         } else {
                             synchronized (Loader.this.lock) {
                                 athis.substate.done(accessor);
