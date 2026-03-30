@@ -369,6 +369,13 @@ public abstract class Loader<ID, VAL> {
                         }
                     }
                 }
+
+                @Override
+                public void save() {
+                    synchronized (Loader.this.lock) {
+                        athis.anyRequiresSave = true;
+                    }
+                }
             };
 
             isInit.set(true);
@@ -381,10 +388,6 @@ public abstract class Loader<ID, VAL> {
 
             if (!doneDuringInit.get()) {
                 this.accessors.add(accessor);
-            }
-
-            if (accessor.requiresSave()) {
-                this.anyRequiresSave = true;
             }
 
             return doneDuringInit.get();
@@ -616,7 +619,7 @@ public abstract class Loader<ID, VAL> {
                     roller.exec(() -> {
                         activeTracker.provisionAccess(Accessor.of((access) -> {
                             this.save(access.id(), access.value()).start(access::done);
-                        }, null, false));
+                        }, null));
                     });
                 }
             }

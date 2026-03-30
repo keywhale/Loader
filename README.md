@@ -202,12 +202,14 @@ An `Accessor` receives an `Access` object when the value is ready and holds the 
 | `value()` | Returns the loaded value |
 | `id()` | Returns the resolved ID |
 | `done()` | Releases the access; Loader may save once all accessors are done |
+| `save()` | Marks the value as modified; triggers a save on unload |
 
 ### Simple one-shot
 
 ```java
 loader.loadPlayer(playerId, Accessor.of(access -> {
     access.value().setCoins(access.value().getCoins() + 100);
+    access.save();
     access.done();
 }));
 ```
@@ -227,18 +229,16 @@ activeSessions.remove(playerId);
 access.done();
 ```
 
-### `onNotFound` and `requiresSave`
+### `onNotFound`
 
 ```java
 loader.loadPlayer(playerId, Accessor.of(
     access -> { /* ... */ },
-    () -> System.out.println("Player not found"), // onNotFound
-    false                                          // requiresSave
+    () -> System.out.println("Player not found") // onNotFound
 ));
 ```
 
 - **`onNotFound`** — called if the value does not exist in storage. Defaults to a no-op.
-- **`requiresSave`** — if `false`, the save step is skipped on unload provided *all* active accessors return `false`. Defaults to `true`.
 
 ---
 

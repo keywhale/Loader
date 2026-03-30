@@ -11,48 +11,39 @@ public interface Accessor<ID, VAL> {
 
     public default void onNotFound() {}
 
-    public default boolean requiresSave() {
-        return true;
-    }
-
     public static <ID, VAL> Accessor<ID, VAL> of(Consumer<Access<ID, VAL>> consumer) {
         return of(
             (access) -> {
                 consumer.accept(access);
                 return null;
             },
-            null,
-            true
+            null
         );
     }
 
     public static <ID, VAL> Accessor<ID, VAL> of(
         Consumer<Access<ID, VAL>> consumer,
-        Runnable onNotFound,
-        boolean requiresSave
+        Runnable onNotFound
     ) {
         return of(
             (access) -> {
                 consumer.accept(access);
                 return null;
             },
-            onNotFound,
-            requiresSave
+            onNotFound
         );
     }
 
     public static <ID, VAL> Accessor<ID, VAL> of(Function<Access<ID, VAL>, Runnable> function) {
         return of(
             function,
-            null,
-            true
+            null
         );
     }
 
     public static <ID, VAL> Accessor<ID, VAL> of(
         Function<Access<ID, VAL>, Runnable> function,
-        Runnable onNotFound,
-        boolean requiresSave
+        Runnable onNotFound
     ) {
         return new Accessor<ID, VAL>() {
 
@@ -75,11 +66,6 @@ public interface Accessor<ID, VAL> {
                 if (onNotFound != null) {
                     onNotFound.run();
                 }
-            }
-
-            @Override
-            public boolean requiresSave() {
-                return requiresSave;
             }
             
         };
