@@ -2,4 +2,4 @@ jdk:
   - openjdk17
 build:
   commands:
-    - mvn install -f loader/pom.xml
+    - mvn install -f anchor/pom.xml
