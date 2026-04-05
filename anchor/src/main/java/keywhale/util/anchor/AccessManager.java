@@ -1,4 +1,4 @@
-package keywhale.util.loader;
+package keywhale.util.anchor;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -8,16 +8,26 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
-import keywhale.util.loader.op.AccessOperation;
-import keywhale.util.loader.op.DeleteOperation;
-import keywhale.util.loader.op.SaveOperation;
+public final class AccessManager<ID, VAL> {
 
-public abstract class Loader<ID, VAL> {
+    private final BiFunction<ID, VAL, SaveOperation> save;
 
     private final Object lock = new Object();
     private final Map<ID, StateTracker<ID, VAL>> trackers = new HashMap<>();
     private boolean isShutdown = false;
+
+    public AccessManager(BiFunction<ID, VAL, SaveOperation> save) {
+        this.save = save;
+    }
+
+    public AccessManager() {
+        this(null);
+    }
 
     public static class ShuttingDownException extends IllegalStateException {}
 
@@ -119,8 +129,8 @@ public abstract class Loader<ID, VAL> {
 
         public void start(AccessOperation<ID, VAL> op, Accessor<ID, VAL> accessor) {
             op.start((id, val) -> {
-                synchronized (Loader.this.lock) {
-                    Loader.this.trackers.remove(this.identifier);
+                synchronized (AccessManager.this.lock) {
+                    AccessManager.this.trackers.remove(this.identifier);
 
                     ActiveStateTracker activeTracker = new ActiveStateTracker(id, val);
 
@@ -133,38 +143,38 @@ public abstract class Loader<ID, VAL> {
                         if (activeTracker.accessors.isEmpty()) {
                             if (activeTracker.anyRequiresSave) {
                                 UnloadingStateTracker unloadTracker = new UnloadingStateTracker(id, val);
-                                Loader.this.trackers.put(id, unloadTracker);
-                                SaveOperation opSave = Loader.this.save(id, val);
+                                AccessManager.this.trackers.put(id, unloadTracker);
+                                SaveOperation opSave = AccessManager.this.save(id, val);
                                 unloadTracker.start(opSave);
                             }
                         } else {
                             activeTracker.shutdown();
-                            Loader.this.trackers.put(id, activeTracker);
+                            AccessManager.this.trackers.put(id, activeTracker);
                         }
                     } else if (this.pendingDelete != null) {
                         if (activeTracker.accessors.isEmpty()) {
-                            Loader.this.deleteReplaceTracker(id, this.pendingDelete, new ArrayList<>());
+                            AccessManager.this.deleteReplaceTracker(id, this.pendingDelete, new ArrayList<>());
                         } else {
                             activeTracker.delete(this.pendingDelete.op(), this.pendingDelete.deleter());
-                            Loader.this.trackers.put(id, activeTracker);
+                            AccessManager.this.trackers.put(id, activeTracker);
                         }
                     } else {
                         if (activeTracker.accessors.isEmpty()) {
                             if (activeTracker.anyRequiresSave) {
                                 UnloadingStateTracker unloadTracker = new UnloadingStateTracker(id, val);
-                                Loader.this.trackers.put(id, unloadTracker);
-                                SaveOperation opSave = Loader.this.save(id, val);
+                                AccessManager.this.trackers.put(id, unloadTracker);
+                                SaveOperation opSave = AccessManager.this.save(id, val);
                                 unloadTracker.start(opSave);
                             }
                         } else {
-                            Loader.this.trackers.put(id, activeTracker);
+                            AccessManager.this.trackers.put(id, activeTracker);
                         }
                     }
                 }
             }, () -> {
                 List<AccessRequest<ID, VAL>> snapshot;
-                synchronized (Loader.this.lock) {
-                    Loader.this.trackers.remove(this.identifier);
+                synchronized (AccessManager.this.lock) {
+                    AccessManager.this.trackers.remove(this.identifier);
                     snapshot = new ArrayList<>(this.pendingAccess);
                 }
                 accessor.onNotFound();
@@ -246,11 +256,11 @@ public abstract class Loader<ID, VAL> {
                 if (athis.accessors.isEmpty()) {
                     if (athis.anyRequiresSave) {
                         UnloadingStateTracker unloadTracker = new UnloadingStateTracker(athis.identifier, athis.value);
-                        Loader.this.trackers.put(athis.identifier, unloadTracker);
-                        SaveOperation opSave = Loader.this.save(athis.identifier, athis.value);
+                        AccessManager.this.trackers.put(athis.identifier, unloadTracker);
+                        SaveOperation opSave = AccessManager.this.save(athis.identifier, athis.value);
                         unloadTracker.start(opSave);
                     } else {
-                        Loader.this.trackers.remove(athis.identifier);
+                        AccessManager.this.trackers.remove(athis.identifier);
                     }
                 }
             }
@@ -284,7 +294,7 @@ public abstract class Loader<ID, VAL> {
                 athis.accessors.remove(accessor);
 
                 if (athis.accessors.isEmpty()) {
-                    Loader.this.deleteReplaceTracker(athis.identifier, this.deleteRequest, this.pendingAccess);
+                    AccessManager.this.deleteReplaceTracker(athis.identifier, this.deleteRequest, this.pendingAccess);
                 }
             }
 
@@ -308,11 +318,11 @@ public abstract class Loader<ID, VAL> {
                 if (athis.accessors.isEmpty()) {
                     if (athis.anyRequiresSave) {
                         UnloadingStateTracker unloadTracker = new UnloadingStateTracker(athis.identifier, athis.value);
-                        Loader.this.trackers.put(athis.identifier, unloadTracker);
-                        SaveOperation opSave = Loader.this.save(athis.identifier, athis.value);
+                        AccessManager.this.trackers.put(athis.identifier, unloadTracker);
+                        SaveOperation opSave = AccessManager.this.save(athis.identifier, athis.value);
                         unloadTracker.start(opSave);
                     } else {
-                        Loader.this.trackers.remove(athis.identifier);
+                        AccessManager.this.trackers.remove(athis.identifier);
                     }
                 }
             }
@@ -363,7 +373,7 @@ public abstract class Loader<ID, VAL> {
                         } else if (!initSuccess.get()) {
                             return;
                         } else {
-                            synchronized (Loader.this.lock) {
+                            synchronized (AccessManager.this.lock) {
                                 athis.substate.done(accessor);
                             }
                         }
@@ -372,7 +382,7 @@ public abstract class Loader<ID, VAL> {
 
                 @Override
                 public void save() {
-                    synchronized (Loader.this.lock) {
+                    synchronized (AccessManager.this.lock) {
                         athis.anyRequiresSave = true;
                     }
                 }
@@ -427,13 +437,13 @@ public abstract class Loader<ID, VAL> {
 
         // Under Lock
         public void onComplete() {
-            Loader.this.trackers.remove(this.identifier);
+            AccessManager.this.trackers.remove(this.identifier);
 
             if (this.pendingShutdown) {
                 this.pendingAccess.clear();
                 this.pendingDelete = null;
             } else if (this.pendingDelete != null) {
-                Loader.this.deleteReplaceTracker(this.identifier, this.pendingDelete, this.pendingAccess);
+                AccessManager.this.deleteReplaceTracker(this.identifier, this.pendingDelete, this.pendingAccess);
             } else if (!this.pendingAccess.isEmpty()) {
                 ActiveStateTracker activeTracker
                     = new ActiveStateTracker(this.identifier, this.value);
@@ -449,12 +459,12 @@ public abstract class Loader<ID, VAL> {
                 if (doneDuringInit) {
                     if (activeTracker.anyRequiresSave) {
                         UnloadingStateTracker unloadTracker = new UnloadingStateTracker(this.identifier, this.value);
-                        Loader.this.trackers.put(this.identifier, unloadTracker);
-                        SaveOperation opSave = Loader.this.save(this.identifier, this.value);
+                        AccessManager.this.trackers.put(this.identifier, unloadTracker);
+                        SaveOperation opSave = AccessManager.this.save(this.identifier, this.value);
                         unloadTracker.start(opSave);
                     }
                 } else {
-                    Loader.this.trackers.put(this.identifier, activeTracker);
+                    AccessManager.this.trackers.put(this.identifier, activeTracker);
                 }
 
                 roller.raise();
@@ -473,7 +483,7 @@ public abstract class Loader<ID, VAL> {
 
         public void start(SaveOperation opSave) {
             opSave.start(() -> {
-                synchronized (Loader.this.lock) {
+                synchronized (AccessManager.this.lock) {
                     this.onComplete();
                 }
             });
@@ -507,7 +517,7 @@ public abstract class Loader<ID, VAL> {
         }
 
         public void onComplete() {
-            Loader.this.trackers.remove(this.identifier);
+            AccessManager.this.trackers.remove(this.identifier);
 
             if (this.pendingShutdown) {
                 this.pendingAccess.clear();
@@ -515,7 +525,7 @@ public abstract class Loader<ID, VAL> {
             }
 
             for (var request : this.pendingAccess) {
-                Loader.this.access(this.identifier, request.op(), request.accessor());
+                AccessManager.this.access(this.identifier, request.op(), request.accessor());
             }
         }
 
@@ -523,7 +533,7 @@ public abstract class Loader<ID, VAL> {
 
     public static class CacheCollisionException extends IllegalStateException {}
     
-    protected void access(
+    public void access(
         AccessOperation<ID, VAL> op, 
         Accessor<ID, VAL> accessor
     ) {
@@ -548,7 +558,7 @@ public abstract class Loader<ID, VAL> {
                                 unloadTracker.start(opSave);
                             }
                         } else {
-                            Loader.this.trackers.put(id, activeTracker);
+                            AccessManager.this.trackers.put(id, activeTracker);
                         }
                     } else {
                         throw new CacheCollisionException();
@@ -558,7 +568,7 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
-    protected void access(
+    public void access(
         ID cachedIdentifier, 
         AccessOperation<ID, VAL> op, 
         Accessor<ID, VAL> accessor
@@ -579,14 +589,14 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
-    protected void delete(
+    public void delete(
         ID identifier,
         DeleteOperation op
     ) {
         this.delete(identifier, op, null);
     }
 
-    protected void delete(
+    public void delete(
         ID identifier,
         DeleteOperation op,
         Deleter deleter
@@ -604,9 +614,27 @@ public abstract class Loader<ID, VAL> {
         }
     }
 
-    protected abstract SaveOperation save(ID identifier, VAL value);
+    private SaveOperation save(ID identifier, VAL value) {
+        SaveOperation op = new SaveOperation() {
 
-    protected void saveActive() {
+            @Override
+            public void start(Runnable callback) {
+                callback.run();
+            }
+            
+        };
+
+        if (this.save != null) {
+            SaveOperation op2 = this.save.apply(identifier, value);
+            if (op2 != null) {
+                op = op2;
+            }
+        }
+
+        return op;
+    }
+
+    public void saveActive() {
         synchronized (this.lock) {
             var roller = new RuntimeExceptionRoller();
 
@@ -625,6 +653,142 @@ public abstract class Loader<ID, VAL> {
             }
 
             roller.raise();
+        }
+    }
+
+    public interface AccessOperation<ID, VAL> {
+        /*
+        Dual-purpose: implementations may access an existing item or create a new one.
+
+        `start` may be called from any thread, but the callback and `onNotFound` must
+        each be called from the thread the implementation intends to run Accessor.init on.
+
+        The callback is called with the resolved ID and value when the item is found
+        or created.
+
+        `onNotFound` is called when the item does not exist and was not created.
+        Pass null for `onNotFound` if creation is guaranteed (not-found is impossible).
+        */
+        public void start(BiConsumer<ID, VAL> callback, Runnable onNotFound);
+    }
+
+    public interface DeleteOperation {
+        /*
+        `start` may be called from any thread. Accesses pending while the delete was
+        in progress are re-issued via their AccessOperation after the delete completes,
+        so the callback thread does not determine where Accessor.init runs.
+        Call `callback` if the row was deleted, `onNotFound` if nothing matched.
+        */
+        public void start(Runnable callback, Runnable onNotFound);
+    }
+
+    public interface SaveOperation {
+        /*
+        `start` may be called from any thread, but the callback must be called from
+        the thread the implementation intends subsequent state resolution to run on
+        (e.g., Accessor.init for any accesses pending while the save was in progress).
+        */
+        public void start(Runnable callback);
+    }
+
+    public interface Access<ID, VAL> {
+        public VAL value();
+        public ID id();
+        public void done();
+        public void save();
+    }
+
+    public interface Accessor<ID, VAL> {
+
+        public void init(Access<ID, VAL> access);
+
+        public void cancel();
+
+        public default void onNotFound() {}
+
+        public static <ID, VAL> Accessor<ID, VAL> of(Consumer<Access<ID, VAL>> consumer) {
+            return of(
+                (access) -> {
+                    consumer.accept(access);
+                    return null;
+                },
+                null
+            );
+        }
+
+        public static <ID, VAL> Accessor<ID, VAL> of(
+            Consumer<Access<ID, VAL>> consumer,
+            Runnable onNotFound
+        ) {
+            return of(
+                (access) -> {
+                    consumer.accept(access);
+                    return null;
+                },
+                onNotFound
+            );
+        }
+
+        public static <ID, VAL> Accessor<ID, VAL> of(Function<Access<ID, VAL>, Runnable> function) {
+            return of(
+                function,
+                null
+            );
+        }
+
+        public static <ID, VAL> Accessor<ID, VAL> of(
+            Function<Access<ID, VAL>, Runnable> function,
+            Runnable onNotFound
+        ) {
+            return new Accessor<ID, VAL>() {
+
+                private Runnable cancel;
+
+                @Override
+                public void init(Access<ID, VAL> access) {
+                    this.cancel = function.apply(access);
+                }
+
+                @Override
+                public void cancel() {
+                    if (this.cancel != null) {
+                        this.cancel.run();
+                    }
+                }
+
+                @Override
+                public void onNotFound() {
+                    if (onNotFound != null) {
+                        onNotFound.run();
+                    }
+                }
+                
+            };
+        }
+    }
+
+    public interface Deleter {
+        void done();
+        default void onNotFound() {}
+
+        public static Deleter of(Runnable onDone, Runnable onNotFound) {
+            return new Deleter() {
+
+                @Override
+                public void done() {
+                    if (onDone != null) {
+                        onDone.run();
+                    }
+                }
+
+                @Override
+                public void onNotFound() {
+                    if (onNotFound != null) {
+                        onNotFound.run();
+                    }
+                }
+                
+            };
         }
     }
 
