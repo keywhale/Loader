@@ -130,44 +130,45 @@ public final class AccessManager<ID, VAL> {
         public void start(AccessOperation<ID, VAL> op, Accessor<ID, VAL> accessor) {
             op.start((id, val) -> {
                 synchronized (AccessManager.this.lock) {
-                    AccessManager.this.trackers.remove(this.identifier);
-
                     ActiveStateTracker activeTracker = new ActiveStateTracker(id, val);
+                    AccessManager.this.trackers.put(id, activeTracker);
 
                     activeTracker.provisionAccess(accessor);
                     for (var request : this.pendingAccess) {
                         activeTracker.provisionAccess(request.accessor());
                     }
 
+                    boolean doneDuringInit = activeTracker.accessors.isEmpty();
+
                     if (this.pendingShutdown) {
-                        if (activeTracker.accessors.isEmpty()) {
+                        if (doneDuringInit) {
                             if (activeTracker.anyRequiresSave) {
                                 UnloadingStateTracker unloadTracker = new UnloadingStateTracker(id, val);
                                 AccessManager.this.trackers.put(id, unloadTracker);
                                 SaveOperation opSave = AccessManager.this.save(id, val);
                                 unloadTracker.start(opSave);
+                            } else {
+                                AccessManager.this.trackers.remove(id);
                             }
                         } else {
                             activeTracker.shutdown();
-                            AccessManager.this.trackers.put(id, activeTracker);
                         }
                     } else if (this.pendingDelete != null) {
-                        if (activeTracker.accessors.isEmpty()) {
+                        if (doneDuringInit) {
                             AccessManager.this.deleteReplaceTracker(id, this.pendingDelete, new ArrayList<>());
                         } else {
                             activeTracker.delete(this.pendingDelete.op(), this.pendingDelete.deleter());
-                            AccessManager.this.trackers.put(id, activeTracker);
                         }
                     } else {
-                        if (activeTracker.accessors.isEmpty()) {
+                        if (doneDuringInit) {
                             if (activeTracker.anyRequiresSave) {
                                 UnloadingStateTracker unloadTracker = new UnloadingStateTracker(id, val);
                                 AccessManager.this.trackers.put(id, unloadTracker);
                                 SaveOperation opSave = AccessManager.this.save(id, val);
                                 unloadTracker.start(opSave);
+                            } else {
+                                AccessManager.this.trackers.remove(id);
                             }
-                        } else {
-                            AccessManager.this.trackers.put(id, activeTracker);
                         }
                     }
                 }
@@ -339,7 +340,7 @@ public final class AccessManager<ID, VAL> {
             this.substate.access(op, accessor);
         }
 
-        private boolean provisionAccess(Accessor<ID, VAL> accessor) {
+        private void provisionAccess(Accessor<ID, VAL> accessor) {
             AtomicBoolean isDone = new AtomicBoolean();
             AtomicBoolean initSuccess = new AtomicBoolean();
             AtomicBoolean doneDuringInit = new AtomicBoolean();
@@ -399,8 +400,6 @@ public final class AccessManager<ID, VAL> {
             if (!doneDuringInit.get()) {
                 this.accessors.add(accessor);
             }
-
-            return doneDuringInit.get();
         }
 
         @Override
@@ -447,6 +446,7 @@ public final class AccessManager<ID, VAL> {
             } else if (!this.pendingAccess.isEmpty()) {
                 ActiveStateTracker activeTracker
                     = new ActiveStateTracker(this.identifier, this.value);
+                AccessManager.this.trackers.put(this.identifier, activeTracker);
 
                 var roller = new RuntimeExceptionRoller();
 
@@ -462,9 +462,9 @@ public final class AccessManager<ID, VAL> {
                         AccessManager.this.trackers.put(this.identifier, unloadTracker);
                         SaveOperation opSave = AccessManager.this.save(this.identifier, this.value);
                         unloadTracker.start(opSave);
+                    } else {
+                        AccessManager.this.trackers.remove(this.identifier);
                     }
-                } else {
-                    AccessManager.this.trackers.put(this.identifier, activeTracker);
                 }
 
                 roller.raise();
@@ -546,8 +546,11 @@ public final class AccessManager<ID, VAL> {
 
                     if (tracker == null) {
                         ActiveStateTracker activeTracker = new ActiveStateTracker(id, val);
+                        AccessManager.this.trackers.put(id, activeTracker);
 
-                        boolean doneDuringInit = activeTracker.provisionAccess(accessor);
+                        activeTracker.provisionAccess(accessor);
+
+                        boolean doneDuringInit = activeTracker.accessors.isEmpty();
 
                         if (doneDuringInit) {
                             if (activeTracker.anyRequiresSave) {
@@ -556,9 +559,9 @@ public final class AccessManager<ID, VAL> {
 
                                 SaveOperation opSave = this.save(id, val);
                                 unloadTracker.start(opSave);
+                            } else {
+                                this.trackers.remove(id);
                             }
-                        } else {
-                            AccessManager.this.trackers.put(id, activeTracker);
                         }
                     } else {
                         throw new CacheCollisionException();
