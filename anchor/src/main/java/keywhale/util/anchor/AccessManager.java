@@ -178,9 +178,9 @@ public final class AccessManager<ID, VAL> {
                     AccessManager.this.trackers.remove(this.identifier);
                     snapshot = new ArrayList<>(this.pendingAccess);
                 }
-                accessor.onNotFound();
+                accessor.fail(new AccessFailedException.NotFound());
                 for (var request : snapshot) {
-                    request.accessor().onNotFound();
+                    request.accessor().fail(new AccessFailedException.NotFound());
                 }
             });
         }
@@ -287,6 +287,10 @@ public final class AccessManager<ID, VAL> {
 
             @Override
             public void shutdown() {
+                for (var request : this.pendingAccess) {
+                    request.accessor().fail(new AccessFailedException.Shutdown());
+                }
+                this.pendingAccess.clear();
                 athis.substate = new ShutdownSubstate();
             }
 
@@ -304,7 +308,9 @@ public final class AccessManager<ID, VAL> {
         private class ShutdownSubstate implements Substate<ID, VAL> {
 
             @Override
-            public void access(AccessOperation<ID, VAL> op, Accessor<ID, VAL> accessor) {}
+            public void access(AccessOperation<ID, VAL> op, Accessor<ID, VAL> accessor) {
+                accessor.fail(new AccessFailedException.Shutdown());
+            }
 
             @Override
             public void delete(DeleteOperation op, Deleter deleter) {}
@@ -439,6 +445,9 @@ public final class AccessManager<ID, VAL> {
             AccessManager.this.trackers.remove(this.identifier);
 
             if (this.pendingShutdown) {
+                for (var request : this.pendingAccess) {
+                    request.accessor().fail(new AccessFailedException.Shutdown());
+                }
                 this.pendingAccess.clear();
                 this.pendingDelete = null;
             } else if (this.pendingDelete != null) {
@@ -520,6 +529,9 @@ public final class AccessManager<ID, VAL> {
             AccessManager.this.trackers.remove(this.identifier);
 
             if (this.pendingShutdown) {
+                for (var request : this.pendingAccess) {
+                    request.accessor().fail(new AccessFailedException.Shutdown());
+                }
                 this.pendingAccess.clear();
                 return;
             }
@@ -567,7 +579,7 @@ public final class AccessManager<ID, VAL> {
                         throw new CacheCollisionException();
                     }
                 }
-            }, accessor::onNotFound);
+            }, () -> accessor.fail(new AccessFailedException.NotFound()));
         }
     }
 
@@ -650,7 +662,8 @@ public final class AccessManager<ID, VAL> {
                     roller.exec(() -> {
                         activeTracker.provisionAccess(Accessor.of((access) -> {
                             this.save(access.id(), access.value()).start(access::done);
-                        }, null));
+                            return null;
+                        }, (exc) -> {}));
                     });
                 }
             }
@@ -695,10 +708,16 @@ public final class AccessManager<ID, VAL> {
     }
 
     public interface Access<ID, VAL> {
-        public VAL value();
         public ID id();
+        public VAL value();
         public void done();
         public void save();
+    }
+
+    public abstract static class AccessFailedException extends Exception {
+        public static class NotFound extends AccessFailedException {}
+        public static class Deleting extends AccessFailedException {}
+        public static class Shutdown extends AccessFailedException {}
     }
 
     public interface Accessor<ID, VAL> {
@@ -707,41 +726,11 @@ public final class AccessManager<ID, VAL> {
 
         public void cancel();
 
-        public default void onNotFound() {}
-
-        public static <ID, VAL> Accessor<ID, VAL> of(Consumer<Access<ID, VAL>> consumer) {
-            return of(
-                (access) -> {
-                    consumer.accept(access);
-                    return null;
-                },
-                null
-            );
-        }
+        public void fail(AccessFailedException exc);
 
         public static <ID, VAL> Accessor<ID, VAL> of(
-            Consumer<Access<ID, VAL>> consumer,
-            Runnable onNotFound
-        ) {
-            return of(
-                (access) -> {
-                    consumer.accept(access);
-                    return null;
-                },
-                onNotFound
-            );
-        }
-
-        public static <ID, VAL> Accessor<ID, VAL> of(Function<Access<ID, VAL>, Runnable> function) {
-            return of(
-                function,
-                null
-            );
-        }
-
-        public static <ID, VAL> Accessor<ID, VAL> of(
-            Function<Access<ID, VAL>, Runnable> function,
-            Runnable onNotFound
+            Function<Access<ID, VAL>, Runnable> onAccess,
+            Consumer<AccessFailedException> onFailure
         ) {
             return new Accessor<ID, VAL>() {
 
@@ -749,7 +738,7 @@ public final class AccessManager<ID, VAL> {
 
                 @Override
                 public void init(Access<ID, VAL> access) {
-                    this.cancel = function.apply(access);
+                    this.cancel = onAccess.apply(access);
                 }
 
                 @Override
@@ -760,10 +749,8 @@ public final class AccessManager<ID, VAL> {
                 }
 
                 @Override
-                public void onNotFound() {
-                    if (onNotFound != null) {
-                        onNotFound.run();
-                    }
+                public void fail(AccessFailedException exc) {
+                    onFailure.accept(exc);
                 }
                 
             };
