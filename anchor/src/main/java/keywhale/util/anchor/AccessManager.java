@@ -7,8 +7,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -50,20 +51,23 @@ public final class AccessManager<ID, VAL> {
 
         deleteTracker.pendingAccess.addAll(accessors);
 
-        deleteRequest.op().start(
-            () -> {
-                synchronized (this.lock) {
+        deleteRequest.op().start().whenComplete((result, ex) -> {
+            synchronized (this.lock) {
+                if (ex != null) {
+                    Throwable cause = ex instanceof CompletionException ? ex.getCause() : ex;
+                    if (deleteRequest.deleter() != null) {
+                        if (cause instanceof DeleteOperation.NotFound) {
+                            deleteRequest.deleter().fail(new AttemptFailedException.NotFound());
+                        } else if (cause instanceof RuntimeException re) {
+                            deleteRequest.deleter().fail(new AttemptFailedException.Other(re));
+                        }
+                    }
+                } else {
                     if (deleteRequest.deleter() != null) deleteRequest.deleter().done();
-                    deleteTracker.onComplete();
                 }
-            },
-            () -> {
-                synchronized (this.lock) {
-                    if (deleteRequest.deleter() != null) deleteRequest.deleter().fail(new AttemptFailedException.NotFound());
-                    deleteTracker.onComplete();
-                }
+                deleteTracker.onComplete();
             }
-        );
+        });
     }
 
     private static class RuntimeExceptionRoller {
@@ -120,7 +124,36 @@ public final class AccessManager<ID, VAL> {
         }
 
         public void start(AccessOperation<ID, VAL> op, Accessor<ID, VAL> accessor) {
-            op.start((id, val) -> {
+            op.start().whenComplete((result, ex) -> {
+                if (ex != null) {
+                    Throwable cause = ex instanceof CompletionException ? ex.getCause() : ex;
+                    AttemptFailedException failure;
+                    if (cause instanceof AccessOperation.NotFound) {
+                        failure = new AttemptFailedException.NotFound();
+                    } else if (cause instanceof RuntimeException re) {
+                        failure = new AttemptFailedException.Other(re);
+                    } else {
+                        return;
+                    }
+                    List<AccessRequest<ID, VAL>> snapshot;
+                    DeleteRequest deleteSnapshot;
+                    synchronized (AccessManager.this.lock) {
+                        AccessManager.this.trackers.remove(this.identifier);
+                        snapshot = new ArrayList<>(this.pendingAccess);
+                        deleteSnapshot = this.pendingDelete;
+                    }
+                    accessor.fail(failure);
+                    for (var request : snapshot) {
+                        request.accessor().fail(failure);
+                    }
+                    if (deleteSnapshot != null && deleteSnapshot.deleter() != null) {
+                        deleteSnapshot.deleter().fail(failure);
+                    }
+                    return;
+                }
+
+                ID id = result.id();
+                VAL val = result.value();
                 synchronized (AccessManager.this.lock) {
                     ActiveStateTracker activeTracker = new ActiveStateTracker(id, val);
                     AccessManager.this.trackers.put(id, activeTracker);
@@ -166,21 +199,6 @@ public final class AccessManager<ID, VAL> {
                             }
                         }
                     }
-                }
-            }, () -> {
-                List<AccessRequest<ID, VAL>> snapshot;
-                DeleteRequest deleteSnapshot;
-                synchronized (AccessManager.this.lock) {
-                    AccessManager.this.trackers.remove(this.identifier);
-                    snapshot = new ArrayList<>(this.pendingAccess);
-                    deleteSnapshot = this.pendingDelete;
-                }
-                accessor.fail(new AttemptFailedException.NotFound());
-                for (var request : snapshot) {
-                    request.accessor().fail(new AttemptFailedException.NotFound());
-                }
-                if (deleteSnapshot != null && deleteSnapshot.deleter() != null) {
-                    deleteSnapshot.deleter().fail(new AttemptFailedException.NotFound());
                 }
             });
         }
@@ -501,7 +519,7 @@ public final class AccessManager<ID, VAL> {
         }
 
         public void start(SaveOperation opSave) {
-            opSave.start(() -> {
+            opSave.start().whenComplete((result, ex) -> {
                 synchronized (AccessManager.this.lock) {
                     this.onComplete();
                 }
@@ -567,8 +585,19 @@ public final class AccessManager<ID, VAL> {
                 return;
             }
 
-            op.start((id, val) -> {
+            op.start().whenComplete((result, ex) -> {
+                if (ex != null) {
+                    Throwable cause = ex instanceof CompletionException ? ex.getCause() : ex;
+                    if (cause instanceof AccessOperation.NotFound) {
+                        accessor.fail(new AttemptFailedException.NotFound());
+                    } else if (cause instanceof RuntimeException re) {
+                        accessor.fail(new AttemptFailedException.Other(re));
+                    }
+                    return;
+                }
                 synchronized (this.lock) {
+                    ID id = result.id();
+                    VAL val = result.value();
                     StateTracker<ID, VAL> tracker = this.trackers.get(id);
 
                     if (tracker == null) {
@@ -591,10 +620,10 @@ public final class AccessManager<ID, VAL> {
                             }
                         }
                     } else {
-                        throw new CacheCollisionException();
+                        accessor.fail(new AttemptFailedException.Other(new CacheCollisionException()));
                     }
                 }
-            }, () -> accessor.fail(new AttemptFailedException.NotFound()));
+            });
         }
     }
 
@@ -651,14 +680,7 @@ public final class AccessManager<ID, VAL> {
     }
 
     private SaveOperation save(ID identifier, VAL value) {
-        SaveOperation op = new SaveOperation() {
-
-            @Override
-            public void start(Runnable callback) {
-                callback.run();
-            }
-            
-        };
+        SaveOperation op = () -> CompletableFuture.completedFuture(null);
 
         if (this.save != null) {
             SaveOperation op2 = this.save.apply(identifier, value);
@@ -682,7 +704,7 @@ public final class AccessManager<ID, VAL> {
                 ) {
                     roller.exec(() -> {
                         activeTracker.provisionAccess(Accessor.of((access) -> {
-                            this.save(access.id(), access.value()).start(access::done);
+                            this.save(access.id(), access.value()).start().whenComplete((r, e) -> access.done());
                             return null;
                         }, (exc) -> {}));
                     });
@@ -694,38 +716,20 @@ public final class AccessManager<ID, VAL> {
     }
 
     public interface AccessOperation<ID, VAL> {
-        /*
-        Dual-purpose: implementations may access an existing item or create a new one.
+        public record Result<ID, VAL>(ID id, VAL value) {}
+        public static class NotFound extends Exception {}
 
-        `start` may be called from any thread, but the callback and `onNotFound` must
-        each be called from the thread the implementation intends to run Accessor.init on.
-
-        The callback is called with the resolved ID and value when the item is found
-        or created.
-
-        `onNotFound` is called when the item does not exist and was not created.
-        Pass null for `onNotFound` if creation is guaranteed (not-found is impossible).
-        */
-        public void start(BiConsumer<ID, VAL> callback, Runnable onNotFound);
+        public CompletableFuture<Result<ID, VAL>> start();
     }
 
     public interface DeleteOperation {
-        /*
-        `start` may be called from any thread. Accesses pending while the delete was
-        in progress are re-issued via their AccessOperation after the delete completes,
-        so the callback thread does not determine where Accessor.init runs.
-        Call `callback` if the row was deleted, `onNotFound` if nothing matched.
-        */
-        public void start(Runnable callback, Runnable onNotFound);
+        public static class NotFound extends Exception {}
+
+        public CompletableFuture<Void> start();
     }
 
     public interface SaveOperation {
-        /*
-        `start` may be called from any thread, but the callback must be called from
-        the thread the implementation intends subsequent state resolution to run on
-        (e.g., Accessor.init for any accesses pending while the save was in progress).
-        */
-        public void start(Runnable callback);
+        public CompletableFuture<Void> start();
     }
 
     public interface Access<ID, VAL> {
@@ -739,6 +743,18 @@ public final class AccessManager<ID, VAL> {
         public static class NotFound extends AttemptFailedException {}
         public static class ShuttingDown extends AttemptFailedException {}
         public static class Deleting extends AttemptFailedException {}
+        public static class Other extends AttemptFailedException {
+            private final RuntimeException cause;
+
+            public Other(RuntimeException cause) {
+                this.cause = cause;
+                this.initCause(cause);
+            }
+
+            public RuntimeException getCause() {
+                return this.cause;
+            }
+        }
     }
 
     public interface Accessor<ID, VAL> {
