@@ -29,14 +29,6 @@ public final class AccessManager<ID, VAL> {
         this(null);
     }
 
-    public static class ShuttingDownException extends IllegalStateException {}
-
-    private void checkShutdown() {
-        if (this.isShutdown) {
-            throw new ShuttingDownException();
-        }
-    }
-
     public void shutdown() {
         synchronized (this.lock) {
             if (this.isShutdown) {
@@ -67,7 +59,7 @@ public final class AccessManager<ID, VAL> {
             },
             () -> {
                 synchronized (this.lock) {
-                    if (deleteRequest.deleter() != null) deleteRequest.deleter().onNotFound();
+                    if (deleteRequest.deleter() != null) deleteRequest.deleter().fail(new AttemptFailedException.NotFound());
                     deleteTracker.onComplete();
                 }
             }
@@ -141,6 +133,9 @@ public final class AccessManager<ID, VAL> {
                     boolean doneDuringInit = activeTracker.accessors.isEmpty();
 
                     if (this.pendingShutdown) {
+                        if (this.pendingDelete != null && this.pendingDelete.deleter() != null) {
+                            this.pendingDelete.deleter().fail(new AttemptFailedException.ShuttingDown());
+                        }
                         if (doneDuringInit) {
                             if (activeTracker.anyRequiresSave) {
                                 UnloadingStateTracker unloadTracker = new UnloadingStateTracker(id, val);
@@ -174,13 +169,18 @@ public final class AccessManager<ID, VAL> {
                 }
             }, () -> {
                 List<AccessRequest<ID, VAL>> snapshot;
+                DeleteRequest deleteSnapshot;
                 synchronized (AccessManager.this.lock) {
                     AccessManager.this.trackers.remove(this.identifier);
                     snapshot = new ArrayList<>(this.pendingAccess);
+                    deleteSnapshot = this.pendingDelete;
                 }
-                accessor.fail(new AccessFailedException.NotFound());
+                accessor.fail(new AttemptFailedException.NotFound());
                 for (var request : snapshot) {
-                    request.accessor().fail(new AccessFailedException.NotFound());
+                    request.accessor().fail(new AttemptFailedException.NotFound());
+                }
+                if (deleteSnapshot != null && deleteSnapshot.deleter() != null) {
+                    deleteSnapshot.deleter().fail(new AttemptFailedException.NotFound());
                 }
             });
         }
@@ -283,12 +283,17 @@ public final class AccessManager<ID, VAL> {
             }
 
             @Override
-            public void delete(DeleteOperation op, Deleter deleter) {}
+            public void delete(DeleteOperation op, Deleter deleter) {
+                if (deleter != null) deleter.fail(new AttemptFailedException.Deleting());
+            }
 
             @Override
             public void shutdown() {
+                if (this.deleteRequest.deleter() != null) {
+                    this.deleteRequest.deleter().fail(new AttemptFailedException.ShuttingDown());
+                }
                 for (var request : this.pendingAccess) {
-                    request.accessor().fail(new AccessFailedException.Shutdown());
+                    request.accessor().fail(new AttemptFailedException.ShuttingDown());
                 }
                 this.pendingAccess.clear();
                 athis.substate = new ShutdownSubstate();
@@ -309,11 +314,13 @@ public final class AccessManager<ID, VAL> {
 
             @Override
             public void access(AccessOperation<ID, VAL> op, Accessor<ID, VAL> accessor) {
-                accessor.fail(new AccessFailedException.Shutdown());
+                accessor.fail(new AttemptFailedException.ShuttingDown());
             }
 
             @Override
-            public void delete(DeleteOperation op, Deleter deleter) {}
+            public void delete(DeleteOperation op, Deleter deleter) {
+                if (deleter != null) deleter.fail(new AttemptFailedException.ShuttingDown());
+            }
 
             @Override
             public void shutdown() {}
@@ -446,9 +453,12 @@ public final class AccessManager<ID, VAL> {
 
             if (this.pendingShutdown) {
                 for (var request : this.pendingAccess) {
-                    request.accessor().fail(new AccessFailedException.Shutdown());
+                    request.accessor().fail(new AttemptFailedException.ShuttingDown());
                 }
                 this.pendingAccess.clear();
+                if (this.pendingDelete != null && this.pendingDelete.deleter() != null) {
+                    this.pendingDelete.deleter().fail(new AttemptFailedException.ShuttingDown());
+                }
                 this.pendingDelete = null;
             } else if (this.pendingDelete != null) {
                 AccessManager.this.deleteReplaceTracker(this.identifier, this.pendingDelete, this.pendingAccess);
@@ -518,7 +528,9 @@ public final class AccessManager<ID, VAL> {
         }
 
         @Override
-        public void delete(DeleteOperation op, Deleter deleter) {}
+        public void delete(DeleteOperation op, Deleter deleter) {
+            if (deleter != null) deleter.fail(new AttemptFailedException.Deleting());
+        }
 
         @Override
         public void shutdown() {
@@ -530,7 +542,7 @@ public final class AccessManager<ID, VAL> {
 
             if (this.pendingShutdown) {
                 for (var request : this.pendingAccess) {
-                    request.accessor().fail(new AccessFailedException.Shutdown());
+                    request.accessor().fail(new AttemptFailedException.ShuttingDown());
                 }
                 this.pendingAccess.clear();
                 return;
@@ -550,7 +562,10 @@ public final class AccessManager<ID, VAL> {
         Accessor<ID, VAL> accessor
     ) {
         synchronized (this.lock) {
-            this.checkShutdown();
+            if (this.isShutdown) {
+                accessor.fail(new AttemptFailedException.ShuttingDown());
+                return;
+            }
 
             op.start((id, val) -> {
                 synchronized (this.lock) {
@@ -579,7 +594,7 @@ public final class AccessManager<ID, VAL> {
                         throw new CacheCollisionException();
                     }
                 }
-            }, () -> accessor.fail(new AccessFailedException.NotFound()));
+            }, () -> accessor.fail(new AttemptFailedException.NotFound()));
         }
     }
 
@@ -589,7 +604,10 @@ public final class AccessManager<ID, VAL> {
         Accessor<ID, VAL> accessor
     ) {
         synchronized (this.lock) {
-            this.checkShutdown();
+            if (this.isShutdown) {
+                accessor.fail(new AttemptFailedException.ShuttingDown());
+                return;
+            }
             
             StateTracker<ID, VAL> tracker = this.trackers.get(cachedIdentifier);
 
@@ -617,7 +635,10 @@ public final class AccessManager<ID, VAL> {
         Deleter deleter
     ) {
         synchronized (this.lock) {
-            this.checkShutdown();
+            if (this.isShutdown) {
+                if (deleter != null) deleter.fail(new AttemptFailedException.ShuttingDown());
+                return;
+            }
 
             StateTracker<ID, VAL> tracker = this.trackers.get(identifier);
 
@@ -714,23 +735,20 @@ public final class AccessManager<ID, VAL> {
         public void save();
     }
 
-    public abstract static class AccessFailedException extends Exception {
-        public static class NotFound extends AccessFailedException {}
-        public static class Deleting extends AccessFailedException {}
-        public static class Shutdown extends AccessFailedException {}
+    public abstract static class AttemptFailedException extends Exception {
+        public static class NotFound extends AttemptFailedException {}
+        public static class ShuttingDown extends AttemptFailedException {}
+        public static class Deleting extends AttemptFailedException {}
     }
 
     public interface Accessor<ID, VAL> {
-
         public void init(Access<ID, VAL> access);
-
         public void cancel();
-
-        public void fail(AccessFailedException exc);
+        public void fail(AttemptFailedException exc);
 
         public static <ID, VAL> Accessor<ID, VAL> of(
             Function<Access<ID, VAL>, Runnable> onAccess,
-            Consumer<AccessFailedException> onFailure
+            Consumer<AttemptFailedException> onFailure
         ) {
             return new Accessor<ID, VAL>() {
 
@@ -749,7 +767,7 @@ public final class AccessManager<ID, VAL> {
                 }
 
                 @Override
-                public void fail(AccessFailedException exc) {
+                public void fail(AttemptFailedException exc) {
                     onFailure.accept(exc);
                 }
                 
@@ -758,10 +776,13 @@ public final class AccessManager<ID, VAL> {
     }
 
     public interface Deleter {
-        void done();
-        default void onNotFound() {}
+        public void done();
+        public void fail(AttemptFailedException exc);
 
-        public static Deleter of(Runnable onDone, Runnable onNotFound) {
+        public static Deleter of(
+            Runnable onDone, 
+            Consumer<AttemptFailedException> onFailure
+        ) {
             return new Deleter() {
 
                 @Override
@@ -772,10 +793,8 @@ public final class AccessManager<ID, VAL> {
                 }
 
                 @Override
-                public void onNotFound() {
-                    if (onNotFound != null) {
-                        onNotFound.run();
-                    }
+                public void fail(AttemptFailedException exc) {
+                    onFailure.accept(exc);
                 }
                 
             };
