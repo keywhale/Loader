@@ -60,6 +60,7 @@ public class Anchor<ID, VAL> {
         VAL value();
         void save();
         @Override void close();
+        Event getCancelEvent();
     }
 
     public static class ShuttingDownException extends IllegalStateException {}
@@ -68,7 +69,8 @@ public class Anchor<ID, VAL> {
         if (shutdown.isSet()) throw new ShuttingDownException();
     }
 
-    public Access<ID, VAL> access(ID id, Event onCancel) {
+    public Access<ID, VAL> access(ID id) {
+        Event onCancel = new Event();
         Supplier<Access<ID, VAL>> s;
         synchronized (this.lock) {
             checkShutdown();
@@ -147,6 +149,11 @@ public class Anchor<ID, VAL> {
                             post = ActiveState.this.done(onCancel);
                         }
                         post.run();
+                    }
+
+                    @Override
+                    public Event getCancelEvent() {
+                        return onCancel;
                     }
                 };
             }

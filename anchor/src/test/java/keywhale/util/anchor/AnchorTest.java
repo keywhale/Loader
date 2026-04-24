@@ -142,8 +142,6 @@ class AnchorTest {
         lc = new Anchor<>(core);
     }
 
-    static final Anchor.Event NO_CANCEL = new Anchor.Event();
-
     // ---- Group A: Single-threaded happy path ----
 
     @Nested
@@ -151,7 +149,7 @@ class AnchorTest {
 
         @Test
         void A1_basicLoadAndAccess() {
-            Future<String> f = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> f = async(() -> lc.access("x").value());
             core.allowLoad();
             assertEquals("value", get(f));
             assertEquals(1, core.loadCalls.get());
@@ -159,7 +157,7 @@ class AnchorTest {
 
         @Test
         void A2_closeWithoutSave_noSave() throws Exception {
-            Future<Void> f = asyncVoid(() -> { lc.access("x", NO_CANCEL).close(); });
+            Future<Void> f = asyncVoid(() -> { lc.access("x").close(); });
             core.allowLoad();
             get(f);
             assertEquals(0, core.saveCalls.get());
@@ -168,7 +166,7 @@ class AnchorTest {
         @Test
         void A3_closeAfterSave_saveTriggered() throws Exception {
             Future<Void> f = asyncVoid(() -> {
-                Anchor.Access<String, String> a = lc.access("x", NO_CANCEL);
+                Anchor.Access<String, String> a = lc.access("x");
                 a.save();
                 a.close();
             });
@@ -182,7 +180,7 @@ class AnchorTest {
         @Test
         void A4_multipleSaveCalls_onlyOneSave() throws Exception {
             Future<Void> f = asyncVoid(() -> {
-                Anchor.Access<String, String> a = lc.access("x", NO_CANCEL);
+                Anchor.Access<String, String> a = lc.access("x");
                 a.save(); a.save(); a.save();
                 a.close();
             });
@@ -212,8 +210,8 @@ class AnchorTest {
         @Test
         void A7_twoSequentialAccesses_twoLoads() throws Exception {
             Future<Void> f = asyncVoid(() -> {
-                lc.access("x", NO_CANCEL).close();
-                lc.access("x", NO_CANCEL).close();
+                lc.access("x").close();
+                lc.access("x").close();
             });
             core.allowLoad();
             core.allowLoad();
@@ -224,9 +222,9 @@ class AnchorTest {
         @Test
         void A8_accessAfterSave_reloads() throws Exception {
             Future<Void> f = asyncVoid(() -> {
-                Anchor.Access<String, String> a = lc.access("x", NO_CANCEL);
+                Anchor.Access<String, String> a = lc.access("x");
                 a.save(); a.close();
-                lc.access("x", NO_CANCEL).close();
+                lc.access("x").close();
             });
             core.allowLoad();
             core.awaitSaveStarted(); core.allowSave();
@@ -244,10 +242,10 @@ class AnchorTest {
 
         @Test
         void B1_twoConcurrentAccesses_oneLoad() throws Exception {
-            Async<String> a = asyncTracked(() -> lc.access("x", NO_CANCEL).value());
+            Async<String> a = asyncTracked(() -> lc.access("x").value());
             core.awaitLoadStarted();
 
-            Future<String> b = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> b = async(() -> lc.access("x").value());
             awaitBlocked(a.thread); // A is inside load; B should park
 
             core.allowLoad();
@@ -261,11 +259,11 @@ class AnchorTest {
             int n = 10;
             List<Future<String>> futures = new ArrayList<>();
 
-            Async<String> first = asyncTracked(() -> lc.access("x", NO_CANCEL).value());
+            Async<String> first = asyncTracked(() -> lc.access("x").value());
             core.awaitLoadStarted();
 
             for (int i = 1; i < n; i++) {
-                futures.add(async(() -> lc.access("x", NO_CANCEL).value()));
+                futures.add(async(() -> lc.access("x").value()));
             }
             Thread.sleep(100); // let all park
 
@@ -281,11 +279,11 @@ class AnchorTest {
             List<Future<Anchor.Access<String, String>>> futures = new ArrayList<>();
 
             Async<Anchor.Access<String, String>> first =
-                asyncTracked(() -> lc.access("x", NO_CANCEL));
+                asyncTracked(() -> lc.access("x"));
             core.awaitLoadStarted();
 
             for (int i = 1; i < n; i++) {
-                futures.add(async(() -> lc.access("x", NO_CANCEL)));
+                futures.add(async(() -> lc.access("x")));
             }
             Thread.sleep(100);
 
@@ -318,7 +316,7 @@ class AnchorTest {
         void C1_accessDuringSave_getsSameValueWithoutReload() throws Exception {
             // Thread A: access, save(), close → SavingState
             Future<Anchor.Access<String, String>> fA = async(() -> {
-                Anchor.Access<String, String> a = lc.access("x", NO_CANCEL);
+                Anchor.Access<String, String> a = lc.access("x");
                 a.save(); a.close();
                 return null; // A is done
             });
@@ -326,7 +324,7 @@ class AnchorTest {
             core.awaitSaveStarted(); // save is running, state = SavingState
 
             // Thread B: access while saving → parks
-            Future<String> fB = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> fB = async(() -> lc.access("x").value());
             Thread.sleep(50);
             assertFalse(fB.isDone());
 
@@ -341,7 +339,7 @@ class AnchorTest {
         @Test
         void C2_deleteDuringSave_parksUntilSaveDone() throws Exception {
             Future<Void> fA = asyncVoid(() -> {
-                Anchor.Access<String, String> a = lc.access("x", NO_CANCEL);
+                Anchor.Access<String, String> a = lc.access("x");
                 a.save(); a.close();
             });
             core.allowLoad();
@@ -364,15 +362,12 @@ class AnchorTest {
         @Test
         void C3_saveSkippedWhenDeletePending() throws Exception {
             // A holds access, marks dirty
-            Future<Anchor.Access<String, String>> fA = async(() -> lc.access("x", NO_CANCEL));
+            Future<Anchor.Access<String, String>> fA = async(() -> lc.access("x"));
             core.allowLoad();
             Anchor.Access<String, String> a = get(fA);
             a.save(); // marks dirty
 
             // B: delete → cancelling, parks
-            Anchor.Event onCancelA = new Anchor.Event();
-            // Re-acquire access with a real onCancel to test cancelling
-            // Actually we already provisioned with NO_CANCEL. Let's just close A.
             Future<Void> fB = asyncVoid(() -> lc.delete("x"));
             Thread.sleep(50); // B should be parked (waiting for A to close)
 
@@ -393,10 +388,10 @@ class AnchorTest {
 
         @Test
         void D1_deleteWhileActive_onCancelSignaled() throws Exception {
-            Anchor.Event onCancel = new Anchor.Event();
-            Future<Anchor.Access<String, String>> fA = async(() -> lc.access("x", onCancel));
+            Future<Anchor.Access<String, String>> fA = async(() -> lc.access("x"));
             core.allowLoad();
             Anchor.Access<String, String> a = get(fA);
+            Anchor.Event onCancel = a.getCancelEvent();
 
             assertFalse(onCancel.isSet());
 
@@ -413,16 +408,15 @@ class AnchorTest {
 
         @Test
         void D2_deleteWhileActive_multipleAccessors_allCancelSignaled() throws Exception {
-            Anchor.Event onCancelA = new Anchor.Event();
-            Anchor.Event onCancelB = new Anchor.Event();
-
-            Future<Anchor.Access<String, String>> fA = async(() -> lc.access("x", onCancelA));
+            Future<Anchor.Access<String, String>> fA = async(() -> lc.access("x"));
             core.awaitLoadStarted();
-            Future<Anchor.Access<String, String>> fB = async(() -> lc.access("x", onCancelB));
+            Future<Anchor.Access<String, String>> fB = async(() -> lc.access("x"));
             core.allowLoad();
 
             Anchor.Access<String, String> a = get(fA);
+            Anchor.Event onCancelA = a.getCancelEvent();
             Anchor.Access<String, String> b = get(fB);
+            Anchor.Event onCancelB = b.getCancelEvent();
 
             Future<Void> fDel = asyncVoid(() -> lc.delete("x"));
             Thread.sleep(50);
@@ -444,7 +438,7 @@ class AnchorTest {
             Async<Void> delAsync = asyncTrackedVoid(() -> lc.delete("x"));
             core.awaitDeleteStarted();
 
-            Future<String> fB = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> fB = async(() -> lc.access("x").value());
             awaitBlocked(delAsync.thread); // D is inside delete; B parks
 
             core.allowDelete(); // delete done → B becomes loader
@@ -464,7 +458,7 @@ class AnchorTest {
             assertEquals(1, core.deleteCalls.get());
             assertEquals(0, core.loadCalls.get());
 
-            Future<String> f2 = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> f2 = async(() -> lc.access("x").value());
             core.allowLoad();
             assertEquals("value", get(f2));
             assertEquals(1, core.loadCalls.get());
@@ -491,7 +485,7 @@ class AnchorTest {
         void D6_deleteWhileLoading() throws Exception {
             // A: access → loading (paused)
             Async<Anchor.Access<String, String>> accAsync =
-                asyncTracked(() -> lc.access("x", NO_CANCEL));
+                asyncTracked(() -> lc.access("x"));
             core.awaitLoadStarted();
 
             // B: delete → parks in pendingDelete
@@ -523,7 +517,7 @@ class AnchorTest {
             Async<Void> delAsync = asyncTrackedVoid(() -> lc.delete("x"));
             core.awaitDeleteStarted();
 
-            Future<String> fB = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> fB = async(() -> lc.access("x").value());
             awaitBlocked(delAsync.thread);
 
             core.allowDelete(); // delete done → B becomes loader
@@ -544,7 +538,7 @@ class AnchorTest {
         @Test
         void E1_loadFails_nothingPending_exceptionPropagates() {
             core.loadException = new RuntimeException("load failed");
-            Future<Void> f = asyncVoid(() -> lc.access("x", NO_CANCEL).close());
+            Future<Void> f = asyncVoid(() -> lc.access("x").close());
             core.allowLoad();
             assertEquals(RuntimeException.class, asyncThrows(f));
             assertEquals(1, core.loadCalls.get());
@@ -553,11 +547,11 @@ class AnchorTest {
         @Test
         void E1b_afterLoadFailure_nextAccessReloads() throws Exception {
             core.loadException = new RuntimeException("load failed");
-            Future<Void> f1 = asyncVoid(() -> lc.access("x", NO_CANCEL).close());
+            Future<Void> f1 = asyncVoid(() -> lc.access("x").close());
             core.allowLoad();
             asyncThrows(f1); // consume exception
 
-            Future<String> f2 = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> f2 = async(() -> lc.access("x").value());
             core.allowLoad();
             assertEquals("value", get(f2));
             assertEquals(2, core.loadCalls.get());
@@ -566,11 +560,11 @@ class AnchorTest {
         @Test
         void E2_loadFails_pendingAccess_pendingBecomesLoader() throws Exception {
             // A: access → loading, fails
-            Async<String> a = asyncTracked(() -> lc.access("x", NO_CANCEL).value());
+            Async<String> a = asyncTracked(() -> lc.access("x").value());
             core.awaitLoadStarted();
 
             // B: access → parks
-            Future<String> b = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> b = async(() -> lc.access("x").value());
             awaitBlocked(a.thread);
 
             core.loadException = new RuntimeException("load failed");
@@ -588,11 +582,11 @@ class AnchorTest {
 
         @Test
         void E3_loadFails_pendingDelete_deleteRunsFirst() throws Exception {
-            Async<String> a = asyncTracked(() -> lc.access("x", NO_CANCEL).value());
+            Async<String> a = asyncTracked(() -> lc.access("x").value());
             core.awaitLoadStarted();
 
             // B: access → pendingAccess
-            Future<String> b = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> b = async(() -> lc.access("x").value());
             Thread.sleep(30);
 
             // C: delete → pendingDelete
@@ -618,10 +612,10 @@ class AnchorTest {
 
         @Test
         void E4_cascadingLoadFailures() throws Exception {
-            Async<String> a = asyncTracked(() -> lc.access("x", NO_CANCEL).value());
+            Async<String> a = asyncTracked(() -> lc.access("x").value());
             core.awaitLoadStarted();
 
-            Future<String> b = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> b = async(() -> lc.access("x").value());
             awaitBlocked(a.thread);
 
             // Both loads fail
@@ -648,7 +642,7 @@ class AnchorTest {
         void F1_loaderReParks_deleteRuns_thenLoaderLoadsAgain() throws Exception {
             // A: access → loading, paused
             Async<Anchor.Access<String, String>> a =
-                asyncTracked(() -> lc.access("x", NO_CANCEL));
+                asyncTracked(() -> lc.access("x"));
             core.awaitLoadStarted();
 
             // B: delete → parks in pendingDelete
@@ -682,11 +676,11 @@ class AnchorTest {
         void F2_loaderAndPendingBothGetAccess_afterDelete() throws Exception {
             // A: access → loading, paused
             Async<Anchor.Access<String, String>> a =
-                asyncTracked(() -> lc.access("x", NO_CANCEL));
+                asyncTracked(() -> lc.access("x"));
             core.awaitLoadStarted();
 
             // B: access → pendingAccess
-            Future<Anchor.Access<String, String>> b = async(() -> lc.access("x", NO_CANCEL));
+            Future<Anchor.Access<String, String>> b = async(() -> lc.access("x"));
             Thread.sleep(30);
 
             // C: delete → pendingDelete
@@ -728,7 +722,7 @@ class AnchorTest {
         void G1_shutdownThenAccess_throws() {
             lc.shutdown();
             assertThrows(Anchor.ShuttingDownException.class,
-                () -> lc.access("x", NO_CANCEL));
+                () -> lc.access("x"));
         }
 
         @Test
@@ -740,10 +734,10 @@ class AnchorTest {
 
         @Test
         void G3_shutdownWhileActive_onCancelSignaled() throws Exception {
-            Anchor.Event onCancel = new Anchor.Event();
-            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x", onCancel));
+            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x"));
             core.allowLoad();
             Anchor.Access<String, String> a = get(f);
+            Anchor.Event onCancel = a.getCancelEvent();
 
             assertFalse(onCancel.isSet());
             lc.shutdown();
@@ -755,10 +749,10 @@ class AnchorTest {
         @Test
         void G4_shutdownWhileLoading_parkedAccessGetsShuttingDown() throws Exception {
             Async<Anchor.Access<String, String>> a =
-                asyncTracked(() -> lc.access("x", NO_CANCEL));
+                asyncTracked(() -> lc.access("x"));
             core.awaitLoadStarted();
 
-            Future<String> b = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> b = async(() -> lc.access("x").value());
             awaitBlocked(a.thread);
 
             lc.shutdown(); // signals B with SHUTDOWN
@@ -774,10 +768,10 @@ class AnchorTest {
 
         @Test
         void G5_shutdownWhileActive_accessorCanStillClose() throws Exception {
-            Anchor.Event onCancel = new Anchor.Event();
-            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x", onCancel));
+            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x"));
             core.allowLoad();
             Anchor.Access<String, String> a = get(f);
+            Anchor.Event onCancel = a.getCancelEvent();
 
             lc.shutdown();
             assertTrue(onCancel.isSet());
@@ -791,7 +785,7 @@ class AnchorTest {
         @Test
         void G6_shutdownWhileSaving_parkedDeleteGetsShuttingDown() throws Exception {
             Future<Void> fA = asyncVoid(() -> {
-                Anchor.Access<String, String> a = lc.access("x", NO_CANCEL);
+                Anchor.Access<String, String> a = lc.access("x");
                 a.save(); a.close();
             });
             core.allowLoad();
@@ -810,7 +804,7 @@ class AnchorTest {
         @Test
         void G7_inFlightLoadNotInterruptedByShutdown() throws Exception {
             Async<Anchor.Access<String, String>> a =
-                asyncTracked(() -> lc.access("x", NO_CANCEL));
+                asyncTracked(() -> lc.access("x"));
             core.awaitLoadStarted();
 
             lc.shutdown();
@@ -825,8 +819,7 @@ class AnchorTest {
 
         @Test
         void G8_closeTwiceAfterShutdown_noException() throws Exception {
-            Anchor.Event onCancel = new Anchor.Event();
-            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x", onCancel));
+            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x"));
             core.allowLoad();
             Anchor.Access<String, String> a = get(f);
 
@@ -844,10 +837,10 @@ class AnchorTest {
         @Test
         void H1_priorityOnLoadCompletion_deleteBeforeAccess() throws Exception {
             Async<Anchor.Access<String, String>> a =
-                asyncTracked(() -> lc.access("x", NO_CANCEL));
+                asyncTracked(() -> lc.access("x"));
             core.awaitLoadStarted();
 
-            Future<String> b = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> b = async(() -> lc.access("x").value());
             Thread.sleep(30);
             Async<Void> c = asyncTrackedVoid(() -> lc.delete("x"));
             awaitBlocked(c.thread); // confirm delete is parked before releasing load
@@ -870,13 +863,13 @@ class AnchorTest {
         @Test
         void H2_priorityOnSaveCompletion_deleteBeforeAccess() throws Exception {
             Future<Void> fA = asyncVoid(() -> {
-                Anchor.Access<String, String> a = lc.access("x", NO_CANCEL);
+                Anchor.Access<String, String> a = lc.access("x");
                 a.save(); a.close();
             });
             core.allowLoad();
             core.awaitSaveStarted();
 
-            Future<String> b = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> b = async(() -> lc.access("x").value());
             Thread.sleep(20);
             Future<Void> c = asyncVoid(() -> lc.delete("x"));
             Thread.sleep(30);
@@ -904,7 +897,7 @@ class AnchorTest {
 
         @Test
         void I1_closeTwice_idempotent() throws Exception {
-            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x", NO_CANCEL));
+            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x"));
             core.allowLoad();
             Anchor.Access<String, String> a = get(f);
             a.close();
@@ -914,7 +907,7 @@ class AnchorTest {
 
         @Test
         void I2_closeTwiceWithSave_onlyOneSave() throws Exception {
-            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x", NO_CANCEL));
+            Future<Anchor.Access<String, String>> f = async(() -> lc.access("x"));
             core.allowLoad();
             Anchor.Access<String, String> a = get(f);
             // Run on async thread since close triggers save (would block main thread on save gate)
@@ -933,7 +926,7 @@ class AnchorTest {
         @Test
         void I4_accessDeleteAccess_correctCounts() throws Exception {
             // access → close → delete → access
-            Future<Void> f1 = asyncVoid(() -> lc.access("x", NO_CANCEL).close());
+            Future<Void> f1 = asyncVoid(() -> lc.access("x").close());
             core.allowLoad();
             get(f1);
 
@@ -941,7 +934,7 @@ class AnchorTest {
             core.allowDelete();
             get(f2);
 
-            Future<String> f3 = async(() -> lc.access("x", NO_CANCEL).value());
+            Future<String> f3 = async(() -> lc.access("x").value());
             core.allowLoad();
             assertEquals("value", get(f3));
 
@@ -956,7 +949,7 @@ class AnchorTest {
             List<Future<String>> futures = new ArrayList<>();
             for (int i = 0; i < n; i++) {
                 String id = "id-" + i;
-                futures.add(async(() -> lc.access(id, NO_CANCEL).value()));
+                futures.add(async(() -> lc.access(id).value()));
             }
             for (int i = 0; i < n; i++) core.allowLoad();
             for (Future<String> f : futures) assertEquals("value", get(f));

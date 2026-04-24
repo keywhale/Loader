@@ -65,15 +65,13 @@ Throw `Core.NotFoundException` from `load` if the value does not exist. Any `Run
 ```java
 Anchor<UUID, PlayerData> anchor = new Anchor<>(new PlayerCore(database));
 
-Anchor.Event onCancel = new Anchor.Event();
-
-try (Anchor.Access<UUID, PlayerData> access = anchor.access(playerId, onCancel)) {
+try (Anchor.Access<UUID, PlayerData> access = anchor.access(playerId)) {
     access.value().setCoins(access.value().getCoins() + 100);
     access.save(); // marks value as modified; triggers a save on close
 } // access.close() called here
 ```
 
-`access(ID, Event)` blocks until the value is loaded and the access is provisioned. Pass a cancellation `Event` that, when set, signals your code to release the access early — for example, when a delete is requested.
+`access(ID)` blocks until the value is loaded and the access is provisioned. Each access has a cancellation `Event` (retrieved via `getCancelEvent()`) that is set when a delete request arrives — your code should watch it and release the access early.
 
 Closing the last access on a value triggers a save if `save()` was called, then evicts the value from memory.
 
@@ -84,6 +82,7 @@ Closing the last access on a value triggers a save if `save()` was called, then 
 | `id()` | The key |
 | `value()` | The loaded value |
 | `save()` | Marks value as modified; a save will run when all accessors close |
+| `getCancelEvent()` | Returns an `Event` that is set when a delete is requested for this key |
 | `close()` | Releases the access |
 
 ---
